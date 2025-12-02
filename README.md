@@ -1,4 +1,4 @@
-content = """# DRS simulator - Custom DRS for VMware vSphere
+"""# DRS simulator - Custom DRS for VMware vSphere
 
 ## Overview
 
