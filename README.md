@@ -143,7 +143,7 @@ To contribute:
 
 ## License
 
-This project is licensed under the MIT License — see the LICENSE file for details.
+This project is licensed under the MIT License see the LICENSE file for details.
 
 ## Disclaimer
 
@@ -156,5 +156,5 @@ The author assumes no liability for any damage resulting from its use.
 ## Support
 
 For issues, questions, or suggestions, please open an issue on GitHub.
-"""
+
 
