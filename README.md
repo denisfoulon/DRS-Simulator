@@ -56,8 +56,8 @@ The script migrates VMs from overloaded hosts to underloaded hosts while respect
 
 Exclude VMs from automated management:
 
-By name pattern:
-
+**By name pattern:**
+<pre>-NameBlacklistPatterns @("vCLS", "NOMOVE")</pre>
 
 ### Storage Compatibility
 
