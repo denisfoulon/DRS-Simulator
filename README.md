@@ -129,6 +129,118 @@ Logged events include:
 - Look for conflicting rules
 - Confirm datastore accessibility
 
+
+## Installation
+
+1. Clone this repository:
+git clone https://github.com/denisfoulon/DRS-Simulator.git
+cd drslike
+
+2. Install VMware PowerCLI (if not already installed):
+Install-Module -Name VMware.PowerCLI -Scope CurrentUser
+
+3. Create a credential file:
+Get-Credential | Export-Clixml -Path "C:\Scripts\DRS\vcenter_credentials.xml"
+
+
+## Configuration
+
+### Basic Parameters
+param(
+[string]$VCenter = "vcenter.example.com",
+[string]$ClusterName = "production_cluster",
+
+
+# Timing
+[int]$NormalLoopSleepSeconds = 60,
+[int]$EvacLoopSleepSeconds = 20,
+
+# Migration limits
+[int]$MaxMigrationsBalancePerLoop = 3,
+[int]$MaxMigrationsEvacTotal = 8,
+
+# Syslog
+[string]$SyslogServer = "syslog.example.com",
+[int]$SyslogPort = 514,
+[switch]$EnableSyslog = $true
+)
+
+
+### Rule Files
+
+Create three text files for your placement rules:
+
+#### Affinity Rules (`affinity_rules.txt`)
+vm-web-01 vm-web-02 vm-web-03
+vm-db-01 vm-db-02
+
+
+
+#### Anti-Affinity Rules (`anti_affinity_rules.txt`)
+vm-license-server esxi-host-01.example.com
+vm-backup-proxy esxi-host-04.example.com
+
+
+## Usage
+
+### Standard Mode
+.\DRS_simulator.ps1 -VCenter "vcenter.example.com" -ClusterName "production_cluster"
+
+
+### Dry-Run Mode (Test without migrations)
+.\DRS_simulator.ps1 -DryRun
+
+
+### With Network Metrics
+.\DRS_simulator.ps1 -IncludeNetwork
+
+
+### Disable Syslog
+.\DRS_simulator.ps1 -EnableSyslog:$false
+
+## How It Works
+
+1. **Initialization**: Connects to vCenter and loads rule files
+2. **Continuous Loop**:
+   - Detects hosts entering maintenance mode
+   - Applies affinity rules
+   - Enforces anti-affinity rules
+   - Applies VM-to-host pinning
+   - Runs load balancing if no evacuation is in progress
+3. **Logging**: All actions are logged to the console and optionally to a Syslog server
+
+### Load Calculation
+Load score = (0.4 × CPU%) + (0.4 × Memory%) + (0.2 × normalized Network%)
+
+
+The script migrates VMs from overloaded hosts to underloaded hosts while respecting all placement rules.
+
+## Advanced Features
+
+### Blacklisting
+
+Exclude VMs from automated management:
+
+**By name pattern:**
+-NameBlacklistPatterns @("vCLS", "NOMOVE")
+
+**By vCenter tag:**
+-TagBlacklistNames @("No-DRS")
+
+### Storage Compatibility
+
+Before migration, the script automatically checks datastore accessibility to avoid failed vMotions.
+
+### Priority System
+
+During host evacuation, rules are applied in this order:
+
+1. VM-to-Host rules (if possible)
+2. Affinity rules
+3. Anti-affinity rules (best effort)
+4. Best available host (mandatory fallback)
+
+
 ## Contributing
 
 Contributions are welcome!
