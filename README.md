@@ -109,10 +109,8 @@ Get-Credential | Export-Clixml -Path "C:\Scripts\DRS\vcenter_credentials.xml"
 ## Configuration
 
 ### Basic Parameters
-param(
-[string]$VCenter = "vcenter.example.com",
-[string]$ClusterName = "production_cluster",
-
+$VCenter = "vcenter.example.com"
+$ClusterName = "production_cluster"
 
 ### Timing
 NormalLoopSleepSeconds = 60
