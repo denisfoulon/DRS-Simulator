@@ -1,4 +1,4 @@
-## DRS simulator - Custom DRS for VMware vSphere
+# DRS simulator - Custom DRS for VMware vSphere
 
 ## Overview
 
@@ -114,19 +114,18 @@ param(
 [string]$ClusterName = "production_cluster",
 
 
-# Timing
-[int]$NormalLoopSleepSeconds = 60,
-[int]$EvacLoopSleepSeconds = 20,
+### Timing
+$NormalLoopSleepSeconds = 60,
+$EvacLoopSleepSeconds = 20,
 
-# Migration limits
-[int]$MaxMigrationsBalancePerLoop = 3,
-[int]$MaxMigrationsEvacTotal = 8,
+### Migration limits
+$MaxMigrationsBalancePerLoop = 3,
+$MaxMigrationsEvacTotal = 8,
 
-# Syslog
-[string]$SyslogServer = "syslog.example.com",
-[int]$SyslogPort = 514,
-[switch]$EnableSyslog = $true
-)
+### Syslog
+$SyslogServer = "syslog.example.com",
+$SyslogPort = 514,
+$EnableSyslog = $true
 
 
 ## Usage
