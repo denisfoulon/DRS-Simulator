@@ -33,13 +33,6 @@ It provides advanced VM placement and load-balancing capabilities with support f
 - Appropriate vCenter permissions (VM migration, host management)
 
 
-### Rule Files
-
-Create three text files for your placement rules:
-
-#### Affinity Rules (affinity_rules.txt)
-
-
 ## How It Works
 
 1. **Initialization**: Connects to vCenter and loads rule files
@@ -161,21 +154,6 @@ param(
 )
 
 
-### Rule Files
-
-Create three text files for your placement rules:
-
-#### Affinity Rules (`affinity_rules.txt`)
-vm-web-01 vm-web-02 vm-web-03
-vm-db-01 vm-db-02
-
-
-
-#### Anti-Affinity Rules (`anti_affinity_rules.txt`)
-vm-license-server esxi-host-01.example.com
-vm-backup-proxy esxi-host-04.example.com
-
-
 ## Usage
 
 ### Standard Mode
@@ -192,6 +170,25 @@ vm-backup-proxy esxi-host-04.example.com
 
 ### Disable Syslog
 <pre>.\DRS_simulator.ps1 -EnableSyslog:$false</pre>
+
+
+### Rule Files
+
+Create three text files for your placement rules:
+
+#### Affinity Rules (affinity_rules.txt)
+<pre>vm-web-01 vm-web-02 vm-web-03
+vm-db-01 vm-db-02</pre>
+
+#### Anti-Affinity Rules (`anti_affinity_rules.txt`)
+<pre>vm-license-server esxi-host-01.example.com
+vm-backup-proxy esxi-host-04.example.com</pre>
+
+#### VM-to-Host Rules (`vm_to_host_rules.txt`)
+<pre>vm-license-server esxi-host-01.example.com
+vm-backup-proxy esxi-host-04.example.com</pre>
+
+
 
 ## How It Works
 
@@ -263,5 +260,3 @@ The author assumes no liability for any damage resulting from its use.
 ## Support
 
 For issues, questions, or suggestions, please open an issue on GitHub.
-
-
