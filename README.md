@@ -184,8 +184,8 @@ vm-backup-proxy esxi-host-04.example.com
 ## Usage
 
 ### Standard Mode
-`.\DRS_simulator.ps1 -VCenter "vcenter.example.com" -ClusterName "production_cluster"`
-
+.\DRS_simulator.ps1 -VCenter "vcenter.example.com" -ClusterName "production_cluster"
+undefined
 
 
 ### Dry-Run Mode (Test without migrations)
