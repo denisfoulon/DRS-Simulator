@@ -112,17 +112,17 @@ Logged events include:
 $ClusterName = "production_cluster"</pre>
 
 ### Timing
-<pre>NormalLoopSleepSeconds = 60
-EvacLoopSleepSeconds = 20</pre>
+<pre>$NormalLoopSleepSeconds = 60
+$EvacLoopSleepSeconds = 20</pre>
 
 ### Migration limits
-<pre>MaxMigrationsBalancePerLoop = 3
-MaxMigrationsEvacTotal = 8</pre>
+<pre>$MaxMigrationsBalancePerLoop = 3
+$MaxMigrationsEvacTotal = 8</pre>
 
 ### Syslog
-<pre>SyslogServer = "syslog.example.com"
-SyslogPort = 514
-EnableSyslog = $true</pre>
+<pre>$SyslogServer = "syslog.example.com"
+$SyslogPort = 514
+$EnableSyslog = $true</pre>
 
 ## Usage
 
