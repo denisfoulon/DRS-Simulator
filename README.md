@@ -102,7 +102,7 @@ Logged events include:
 <pre>Install-Module -Name VMware.PowerCLI -Scope CurrentUser</pre>
 
 3. Create a credential file:
-<pre>Get-Credential | Export-Clixml -Path "C:\Scripts\DRS\vcenter_credentials.xml"</pre>
+<pre>Get-Credential | Export-Clixml -Path "C:\MyawesomeProject\vcenter_credentials.xml"</pre>
 
 
 ## Configuration
