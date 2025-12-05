@@ -93,31 +93,6 @@ Logged events include:
 - **Error (3)**: Failed operations
 - **Debug (7)**: Detailed troubleshooting data
 
-## Troubleshooting
-
-### Common Issues
-
-#### Cannot connect to vCenter
-
-- Verify the credential file
-- Check network connectivity
-- Ensure PowerCLI is installed
-
-#### No migrations occurring
-
-- Check if VMs are blacklisted
-- Ensure enough hosts are available
-- Verify datastore compatibility
-- Check migration limits
-
-#### Rules not being applied correctly
-
-- Check rule file syntax
-- Ensure relevant VMs exist and are powered on
-- Look for conflicting rules
-- Confirm datastore accessibility
-
-
 ## Installation
 
 1. Clone this repository:
@@ -232,6 +207,29 @@ During host evacuation, rules are applied in this order:
 3. Anti-affinity rules (best effort)
 4. Best available host (mandatory fallback)
 
+## Troubleshooting
+
+### Common Issues
+
+#### Cannot connect to vCenter
+
+- Verify the credential file
+- Check network connectivity
+- Ensure PowerCLI is installed
+
+#### No migrations occurring
+
+- Check if VMs are blacklisted
+- Ensure enough hosts are available
+- Verify datastore compatibility
+- Check migration limits
+
+#### Rules not being applied correctly
+
+- Check rule file syntax
+- Ensure relevant VMs exist and are powered on
+- Look for conflicting rules
+- Confirm datastore accessibility
 
 ## Contributing
 
