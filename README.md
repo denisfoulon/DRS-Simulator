@@ -115,17 +115,17 @@ param(
 
 
 ### Timing
-$NormalLoopSleepSeconds = 60,
-$EvacLoopSleepSeconds = 20,
+NormalLoopSleepSeconds = 60,
+EvacLoopSleepSeconds = 20,
 
 ### Migration limits
-$MaxMigrationsBalancePerLoop = 3,
-$MaxMigrationsEvacTotal = 8,
+MaxMigrationsBalancePerLoop = 3,
+MaxMigrationsEvacTotal = 8,
 
 ### Syslog
-$SyslogServer = "syslog.example.com",
-$SyslogPort = 514,
-$EnableSyslog = $true
+SyslogServer = "syslog.example.com",
+SyslogPort = 514,
+EnableSyslog = $true
 
 
 ## Usage
