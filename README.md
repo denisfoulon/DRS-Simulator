@@ -32,11 +32,6 @@ It provides advanced VM placement and load-balancing capabilities with support f
 - vCenter Server 6.5 or later
 - Appropriate vCenter permissions (VM migration, host management)
 
-## Installation
-
-Clone this repository:
-
-
 
 ### Rule Files
 
