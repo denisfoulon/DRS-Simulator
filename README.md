@@ -184,19 +184,19 @@ vm-backup-proxy esxi-host-04.example.com
 ## Usage
 
 ### Standard Mode
-<pre> .\DRS_simulator.ps1 -VCenter "vcenter.example.com" -ClusterName "production_cluster" </pre>
+<pre>.\DRS_simulator.ps1 -VCenter "vcenter.example.com" -ClusterName "production_cluster"</pre>
 
 
 ### Dry-Run Mode (Test without migrations)
-.\DRS_simulator.ps1 -DryRun
+<pre>.\DRS_simulator.ps1 -DryRun</pre>
 
 
 ### With Network Metrics
-.\DRS_simulator.ps1 -IncludeNetwork
+<pre>.\DRS_simulator.ps1 -IncludeNetwork</pre>
 
 
 ### Disable Syslog
-.\DRS_simulator.ps1 -EnableSyslog:$false
+<pre>.\DRS_simulator.ps1 -EnableSyslog:$false</pre>
 
 ## How It Works
 
@@ -222,10 +222,10 @@ The script migrates VMs from overloaded hosts to underloaded hosts while respect
 Exclude VMs from automated management:
 
 **By name pattern:**
--NameBlacklistPatterns @("vCLS", "NOMOVE")
+<pre>-NameBlacklistPatterns @("vCLS", "NOMOVE")</pre>
 
 **By vCenter tag:**
--TagBlacklistNames @("No-DRS")
+<pre>-TagBlacklistNames @("No-DRS")</pre>
 
 ### Storage Compatibility
 
