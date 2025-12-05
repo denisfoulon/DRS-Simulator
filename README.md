@@ -96,34 +96,33 @@ Logged events include:
 ## Installation
 
 1. Clone this repository:
-git clone https://github.com/denisfoulon/DRS-Simulator.git
-cd drslike
+<pre>git clone https://github.com/denisfoulon/DRS-Simulator.git</pre>
 
 2. Install VMware PowerCLI (if not already installed):
-Install-Module -Name VMware.PowerCLI -Scope CurrentUser
+<pre>Install-Module -Name VMware.PowerCLI -Scope CurrentUser</pre>
 
 3. Create a credential file:
-Get-Credential | Export-Clixml -Path "C:\Scripts\DRS\vcenter_credentials.xml"
+<pre>Get-Credential | Export-Clixml -Path "C:\Scripts\DRS\vcenter_credentials.xml"</pre>
 
 
 ## Configuration
 
 ### Basic Parameters
-$VCenter = "vcenter.example.com"
-$ClusterName = "production_cluster"
+<pre>$VCenter = "vcenter.example.com"
+$ClusterName = "production_cluster"</pre>
 
 ### Timing
-NormalLoopSleepSeconds = 60
-EvacLoopSleepSeconds = 20
+<pre>NormalLoopSleepSeconds = 60
+EvacLoopSleepSeconds = 20</pre>
 
 ### Migration limits
-MaxMigrationsBalancePerLoop = 3
-MaxMigrationsEvacTotal = 8
+<pre>MaxMigrationsBalancePerLoop = 3
+MaxMigrationsEvacTotal = 8</pre>
 
 ### Syslog
-SyslogServer = "syslog.example.com"
+<pre>SyslogServer = "syslog.example.com"
 SyslogPort = 514
-EnableSyslog = $true
+EnableSyslog = $true</pre>
 
 ## Usage
 
