@@ -251,7 +251,7 @@ This project is licensed under the MIT License see the LICENSE file for details.
 
 ## Disclaimer
 
-This script is provided AS-IS without warranty of any kind.
+⚠️ **This script is provided AS-IS without warranty of any kind.**
 
 Always test in a non-production environment.
 
