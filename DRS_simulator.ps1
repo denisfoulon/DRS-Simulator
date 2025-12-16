@@ -1,13 +1,28 @@
 <#
-================================================================================
-DRS-Simulator - Custom DRS Implementation for VMware vSphere
-================================================================================
+.SYNOPSIS
+    DRS Simulator Script - Version 1.32
 
-.AUTHOR
-    Denis Foulon
-    Version: 1.31
+.DESCRIPTION
+    DRS-Simulator - Custom DRS Implementation for VMware vSphere
+
+.NOTES
+    Version: 1.32
+    AUTHOR : Denis Foulon
     Date: 2025-12-02
-    GitHub: https://github.com/denisfoulon/DRS-Simulator
+    What's new in v1.31:
+    - Added Send-SyslogMessage function to send logs to remote server
+    - All logs are now sent via UDP to the log server
+    - Console display preserved in parallel
+    - Configurable Syslog parameters (server, port, facility)
+
+    What's new in v1.32:
+    - ✅ Automatic garbage collection every 12h
+    - ✅ vCenter recycling every 24h with automatic reconnection
+    - ✅ Proper UDP disposal (Close + Dispose) in Send-SyslogMessage
+    - ✅ Automatic Get-Stat cleanup after each use
+    - ✅ Memory monitoring every hour with alerts
+    - ✅ Automatic statistics cache cleanup
+    - ✅ Automatic alerts if memory exceeds 2 GB
 
 .ABOUT
     This script simulates DRS-like behavior for VMware vSphere environments.
@@ -41,39 +56,23 @@ DRS-Simulator - Custom DRS Implementation for VMware vSphere
 ================================================================================
 #>
 
-<#
-.SYNOPSIS
-    DRS Simulator Script - Version 1.31
-
-.DESCRIPTION
-    Pseudo-DRS for VMware with centralized log management via Syslog
-
-.NOTES
-    Version: 1.31
-    Date: 2025-12-02
-    What's New in v1.31:
-    - Added Send-SyslogMessage function for sending logs to a remote server
-    - All logs are now sent via UDP to the log server
-    - Console output is still displayed in parallel
-    - Configurable Syslog parameters (server, port, facility)
-#>
 
 param(
     [string]$VCenter = "vcenter.example.com",
-    [string]$ClusterName = "production_cluster",
+    [string]$ClusterName = "cluster-name",
 
-    # Paramètres temporels
+    # Timing parameters
     [int]$NormalLoopSleepSeconds = 60,
     [int]$EvacLoopSleepSeconds = 20,
 
-    # Limites de migrations
+    # Migration limits
     [int]$MaxMigrationsBalancePerLoop = 3,
     [int]$MaxMigrationsEvacTotal = 8,
     [int]$MaxMigrationsAffinityPerLoop = 5,
     [int]$MaxMigrationsAntiAffinityPerLoop = 5,
     [int]$MaxMigrationsVmToHostPerLoop = 5,
 
-    # Seuils CPU/Mem
+    # CPU/Memory thresholds
     [int]$HighCpuPercent = 75,
     [int]$LowCpuPercent = 40,
     [int]$HighMemPercent = 80,
@@ -83,32 +82,44 @@ param(
     [string[]]$NameBlacklistPatterns = @("vCLS", "NOMOVE"),
     [string[]]$TagBlacklistNames = @("No-DRS"),
 
-    # Fichiers de règles
-    [string]$AffinityListPath = "C:\DRS_simulator\liste_affinite.txt",
+    # Rule files
+    [string]$AffinityListPath = "C:\scripts\drs_simulator\affinity_list.txt",
     [int]$AffinityCheckIntervalSeconds = 300,
-    [string]$AntiAffinityListPath = "C:\DRS_simulator\liste_antiaffinite.txt",
+    [string]$AntiAffinityListPath = "C:\scripts\drs_simulator\antiaffinity_list.txt",
     [int]$AntiAffinityCheckIntervalSeconds = 300,
-    [string]$VmToHostListPath = "C:\DRS_simulator\list_vm_to_host.txt",
+    [string]$VmToHostListPath = "C:\scripts\drs_simulator\vm_to_host_list.txt",
     [int]$VmToHostCheckIntervalSeconds = 300,
 
-    # Paramètres SYSLOG (nouveauté v1.31)
-    [string]$SyslogServer = "syslog.example.com",  # IP de votre serveur de logs
-    [int]$SyslogPort = 514,                    # Port UDP standard syslog
-    [int]$SyslogFacility = 16,                 # Facility 16 = local0
-    [switch]$EnableSyslog = $true,             # Activer/désactiver l'envoi syslog
+    # SYSLOG parameters (new in v1.31)
+    [string]$SyslogServer = "syslog-server.example.com",
+    [int]$SyslogPort = 514,
+    [int]$SyslogFacility = 16,
+    [switch]$EnableSyslog = $true,
 
     # Options
     [switch]$IncludeNetwork,
     [switch]$DryRun
 )
 
+
+#region Memory Management Tracking Variables
+$script:lastGarbageCollection = Get-Date
+$script:lastVCenterRecycle = Get-Date
+$script:lastMemoryMonitor = Get-Date
+$script:gcIntervalHours = 12
+$script:vcRecycleIntervalHours = 24
+$script:memoryMonitorIntervalHours = 1
+#endregion
+
+
+#region Syslog Function (new in v1.31)
 <#
 .SYNOPSIS
     Sends a syslog-formatted message to a remote server
 
 .DESCRIPTION
     This function sends messages in RFC 3164 format via UDP to a syslog server.
-    Severity levels are automatically determined based on the message type.
+    Severity levels are automatically determined based on message type.
 
 .PARAMETER Message
     The message to send
@@ -125,7 +136,7 @@ function Send-SyslogMessage {
         [string]$Message,
 
         [ValidateRange(0,7)]
-        [int]$Severity = 6,  # Info par défaut
+        [int]$Severity = 6,
 
         [switch]$AlsoWriteHost
     )
@@ -138,36 +149,29 @@ function Send-SyslogMessage {
     }
 
     try {
-        # Calcul du PRI selon RFC 3164: PRI = (Facility * 8) + Severity
         $Priority = ($script:SyslogFacility * 8) + $Severity
-
-        # Format du message syslog: <PRI>TIMESTAMP HOSTNAME MESSAGE
         $Timestamp = Get-Date -Format "MMM dd HH:mm:ss"
         $Hostname = $env:COMPUTERNAME
-        $SyslogMsg = "<$Priority>$Timestamp $Hostname DRSLIKE: $Message"
+        $SyslogMsg = "<$Priority>$Timestamp $Hostname DRS_Simulator: $Message"
 
-        # Création du client UDP
         $UdpClient = New-Object System.Net.Sockets.UdpClient
         $UdpClient.Connect($script:SyslogServer, $script:SyslogPort)
 
-        # Encodage et envoi
         $Encoding = [System.Text.Encoding]::UTF8
         $BytesSyslogMessage = $Encoding.GetBytes($SyslogMsg)
 
-        # Limitation à 1024 octets (RFC 3164)
         if ($BytesSyslogMessage.Length -gt 1024) {
             $BytesSyslogMessage = $BytesSyslogMessage[0..1023]
         }
 
         $null = $UdpClient.Send($BytesSyslogMessage, $BytesSyslogMessage.Length)
         $UdpClient.Close()
+        $UdpClient.Dispose()
 
     } catch {
-        # En cas d'erreur syslog, on affiche au moins en console
-        Write-Warning "Erreur envoi syslog: $($_.Exception.Message)"
+        Write-Warning "Syslog send error: $($_.Exception.Message)"
     }
 
-    # Affichage console si demandé
     if ($AlsoWriteHost) {
         Write-Host $Message
     }
@@ -175,7 +179,7 @@ function Send-SyslogMessage {
 
 <#
 .SYNOPSIS
-    Wrapper pour remplacer Write-Host avec envoi syslog
+    Wrapper to replace Write-Host with syslog sending
 #>
 function Write-Log {
     param(
@@ -186,20 +190,16 @@ function Write-Log {
         [string]$Level = 'Info'
     )
 
-    # Mapping des niveaux vers syslog severity
     $SeverityMap = @{
-        'Error'   = 3  # Error
-        'Warning' = 4  # Warning
-        'Info'    = 6  # Informational
-        'Debug'   = 7  # Debug
+        'Error'   = 3
+        'Warning' = 4
+        'Info'    = 6
+        'Debug'   = 7
     }
 
     $Severity = $SeverityMap[$Level]
-
-    # Envoi syslog + affichage console
     Send-SyslogMessage -Message $Message -Severity $Severity -AlsoWriteHost
 
-    # Gestion des couleurs pour Write-Host selon le niveau
     if ($Level -eq 'Warning') {
         Write-Host $Message -ForegroundColor Yellow
     } elseif ($Level -eq 'Error') {
@@ -208,20 +208,148 @@ function Write-Log {
 }
 #endregion
 
-#region Connexion vCenter
-Write-Log -Message "Connexion à $VCenter ..."
 
-# compte utilisé dans cred_op : ADLYON2\op_powercli
+#region Memory Management Functions (v1.32)
+<#
+.SYNOPSIS
+    Force garbage collection to free memory
+#>
+function Invoke-MemoryCleanup {
+    param([switch]$Force)
+
+    try {
+        $beforeMem = [System.GC]::GetTotalMemory($false) / 1MB
+
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+        [System.GC]::Collect()
+
+        $afterMem = [System.GC]::GetTotalMemory($false) / 1MB
+        $freed = $beforeMem - $afterMem
+
+        Write-Log -Message "[MEMORY] Garbage collection performed: ${freed:F2} MB freed (before: ${beforeMem:F2} MB, after: ${afterMem:F2} MB)" -Level Info
+        $script:lastGarbageCollection = Get-Date
+    }
+    catch {
+        Write-Log -Message "[MEMORY] Error during garbage collection: $_" -Level Warning
+    }
+}
+
+<#
+.SYNOPSIS
+    Recycle vCenter connection to free resources
+#>
+function Invoke-VCenterRecycle {
+    param(
+        [Parameter(Mandatory)]
+        [string]$VCenter,
+
+        [Parameter(Mandatory)]
+        $Credential
+    )
+
+    try {
+        Write-Log -Message "[VCENTER] Recycling vCenter connection..." -Level Info
+
+        $currentConnections = $global:DefaultVIServers
+        if ($currentConnections) {
+            foreach ($conn in $currentConnections) {
+                Disconnect-VIServer -Server $conn -Confirm:$false -ErrorAction SilentlyContinue
+                Write-Log -Message "[VCENTER] Disconnected from $($conn.Name)" -Level Info
+            }
+        }
+
+        Start-Sleep -Seconds 5
+
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+
+        Write-Log -Message "[VCENTER] Reconnecting to $VCenter..." -Level Info
+        Connect-VIServer -Server $VCenter -Credential $Credential -ErrorAction Stop | Out-Null
+
+        Write-Log -Message "[VCENTER] Reconnection successful" -Level Info
+        $script:lastVCenterRecycle = Get-Date
+
+        return $true
+    }
+    catch {
+        Write-Log -Message "[VCENTER] Error during recycle: $_" -Level Error
+        Write-Log -Message "[VCENTER] Attempting emergency reconnection..." -Level Warning
+
+        try {
+            Connect-VIServer -Server $VCenter -Credential $Credential -ErrorAction Stop | Out-Null
+            Write-Log -Message "[VCENTER] Emergency reconnection successful" -Level Info
+            return $true
+        }
+        catch {
+            Write-Log -Message "[VCENTER] Emergency reconnection failed: $_" -Level Error
+            return $false
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Monitor PowerShell process memory usage
+#>
+function Show-MemoryUsage {
+    try {
+        $process = Get-Process -Id $PID
+        $memoryMB = $process.WorkingSet64 / 1MB
+        $peakMemoryMB = $process.PeakWorkingSet64 / 1MB
+        $privateMemoryMB = $process.PrivateMemorySize64 / 1MB
+
+        Write-Log -Message "[MEMORY] Current memory usage: ${memoryMB:F2} MB (peak: ${peakMemoryMB:F2} MB, private: ${privateMemoryMB:F2} MB)" -Level Info
+
+        if ($memoryMB -gt 2048) {
+            Write-Log -Message "[MEMORY] ⚠️ WARNING: High memory usage (>${memoryMB:F2} MB)" -Level Warning
+            Invoke-MemoryCleanup
+        }
+
+        $script:lastMemoryMonitor = Get-Date
+    }
+    catch {
+        Write-Log -Message "[MEMORY] Error during memory monitoring: $_" -Level Warning
+    }
+}
+
+<#
+.SYNOPSIS
+    Clean statistics cache
+#>
+function Clear-StatisticsCache {
+    try {
+        if (Get-Command Clear-Variable -ErrorAction SilentlyContinue) {
+            Get-Variable -Scope Global | Where-Object { 
+                $_.Name -like '*Stat*' -or $_.Name -like '*Metric*' 
+            } | ForEach-Object {
+                try {
+                    Remove-Variable -Name $_.Name -Scope Global -ErrorAction SilentlyContinue
+                }
+                catch {}
+            }
+        }
+
+        Write-Log -Message "[MEMORY] Statistics cache cleaned" -Level Debug
+    }
+    catch {
+        Write-Log -Message "[MEMORY] Error during cache cleanup: $_" -Level Warning
+    }
+}
+#endregion
+
+
+#region vCenter Connection
+Write-Log -Message "Connecting to $VCenter ..."
+
 $credential = Import-Clixml -Path C:\scripts\cred_op
 Connect-VIServer -Server $vCenter -Credential $credential | Out-Null
 
 $clusterNameLocal = $ClusterName
-Write-Log -Message "Démarrage pseudo-DRS sur cluster '$clusterNameLocal' (Ctrl+C pour arrêter)."
+Write-Log -Message "Starting pseudo-DRS on cluster '$clusterNameLocal' (Ctrl+C to stop)."
 
-# Variable d'état pour suivre le mode évacuation
 $script:wasInEvacuationMode = $false
 
-# Variables pour les systèmes d'affinité ET anti-affinité ET VM-to-Host
 $script:lastAffinityLoad = $null
 $script:lastAntiAffinityLoad = $null
 $script:lastVmToHostLoad = $null
@@ -229,13 +357,15 @@ $script:affinityGroups = @()
 $script:antiAffinityGroups = @()
 $script:vmToHostRules = @()
 
-# ---------- Gestion fichier affinité ----------
+#endregion
 
+
+#region Affinity Management
 function Read-AffinityList {
     param([string]$FilePath)
     
     if (-not (Test-Path $FilePath)) {
-        Write-Log -Message " -Level WarningFichier d'affinité introuvable : $FilePath"
+        Write-Log -Message "Affinity file not found: $FilePath" -Level Warning
         return @()
     }
     
@@ -246,14 +376,13 @@ function Read-AffinityList {
         $line = $line.Trim()
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         
-        # Découper la ligne en noms de VMs (séparés par espaces)
         $vmNames = $line -split '\s+' | Where-Object { $_ -ne '' }
         if ($vmNames.Count -gt 1) {
-            $groups += ,@($vmNames)  # Ajouter le groupe
+            $groups += ,@($vmNames)
         }
     }
     
-    Write-Log -Message "Fichier d'affinité chargé : $($groups.Count) groupe(s) détecté(s)"
+    Write-Log -Message "Affinity file loaded: $($groups.Count) group(s) detected" -Level Info
     return $groups
 }
 
@@ -271,7 +400,6 @@ function Get-AffinityTargetHost {
         return $null 
     }
     
-    # Trouver le groupe contenant cette VM
     $groupVMs = $null
     foreach ($group in $AffinityGroups) {
         if ($group -contains $VMName) {
@@ -282,23 +410,19 @@ function Get-AffinityTargetHost {
     
     if (-not $groupVMs) { return $null }
     
-    # Chercher les hôtes où des VMs du groupe sont déjà présentes
     $clusterObj = Get-Cluster -Name $ClusterName -ErrorAction SilentlyContinue
     if (-not $clusterObj) { return $null }
     
-    # Récupérer toutes les VMs du cluster une seule fois
     $allClusterVMs = Get-VM -Location $clusterObj -ErrorAction SilentlyContinue
     
     $candidateHosts = @()
     
     foreach ($vmNameInGroup in $groupVMs) {
-        if ($vmNameInGroup -eq $VMName) { continue }  # Ignorer la VM elle-même
+        if ($vmNameInGroup -eq $VMName) { continue }
         
-        # Filtrer par nom exact au lieu d'utiliser Get-VM -Name
         $groupVM = $allClusterVMs | Where-Object { $_.Name -eq $vmNameInGroup -and $_.PowerState -eq 'PoweredOn' }
         
         if ($groupVM -and $groupVM.VMHost) {
-            # Vérifier si cet hôte est compatible stockage avec notre VM
             if (Test-StorageCompatible -VM $VM -TargetHost $groupVM.VMHost) {
                 $candidateHosts += $groupVM.VMHost
             }
@@ -307,7 +431,6 @@ function Get-AffinityTargetHost {
     
     if ($candidateHosts.Count -eq 0) { return $null }
     
-    # Retourner l'hôte qui héberge le plus de VMs du groupe
     $bestHost = $candidateHosts | Group-Object -Property Name | 
                 Sort-Object Count -Descending | 
                 Select-Object -First 1 -ExpandProperty Name
@@ -330,26 +453,22 @@ function Enforce-AffinityGroups {
         return 
     }
 
-    Write-Log -Message "[AFFINITE] Vérification et regroupement des VMs selon les règles d'affinité..."
+    Write-Log -Message "[AFFINITY] Checking and grouping VMs according to affinity rules..."
 
     $clusterObj = Get-Cluster -Name $ClusterName -ErrorAction Stop
     $allHosts = Get-VMHost -Location $clusterObj | Where-Object { $_.ConnectionState -eq 'Connected' }
-    
-    # Récupérer toutes les VMs du cluster une seule fois
     $allClusterVMs = Get-VM -Location $clusterObj -ErrorAction SilentlyContinue
 
     $movesDone = 0
 
     foreach ($group in $AffinityGroups) {
         if ($movesDone -ge $MaxMigrations) { 
-            Write-Log -Message "[AFFINITE] Limite de migrations atteinte ($MaxMigrations), suite au prochain cycle."
+            Write-Log -Message "[AFFINITY] Migration limit reached ($MaxMigrations), continuing next cycle."
             return 
         }
 
-        # Récupérer toutes les VMs du groupe qui existent et sont allumées
         $groupVMs = @()
         foreach ($vmName in $group) {
-            # Filtrer par nom exact au lieu d'utiliser Get-VM -Name
             $vm = $allClusterVMs | Where-Object { $_.Name -eq $vmName -and $_.PowerState -eq 'PoweredOn' }
             
             if ($vm -and -not (Test-VmBlacklisted -VM $vm `
@@ -361,7 +480,6 @@ function Enforce-AffinityGroups {
 
         if ($groupVMs.Count -le 1) { continue }
 
-        # Déterminer l'hôte de référence en tenant compte du stockage
         $hostCandidates = @{}
         
         foreach ($vm in $groupVMs) {
@@ -389,30 +507,30 @@ function Enforce-AffinityGroups {
             Select-Object -First 1
 
         if (-not $bestCandidate) { 
-            Write-Log -Message " -Level Warning[AFFINITE] Impossible de trouver un hôte compatible pour le groupe [$($group -join ', ')]"
+            Write-Log -Message "[AFFINITY] Cannot find compatible host for group [$($group -join ', ')]" -Level Warning
             continue 
         }
 
         $targetHost = $bestCandidate.Value.Host
         $targetHostName = $bestCandidate.Key
 
-        Write-Log -Message "[AFFINITE] Groupe [$($group -join ', ')] - Hôte cible: $targetHostName ($($bestCandidate.Value.CompatibleVMCount)/$($groupVMs.Count) VMs compatibles)"
+        Write-Log -Message "[AFFINITY] Group [$($group -join ', ')] - Target host: $targetHostName ($($bestCandidate.Value.CompatibleVMCount)/$($groupVMs.Count) compatible VMs)"
 
         foreach ($vm in $groupVMs) {
             if ($movesDone -ge $MaxMigrations) { 
-                Write-Log -Message "[AFFINITE] Limite de migrations atteinte, suite au prochain cycle."
+                Write-Log -Message "[AFFINITY] Migration limit reached, continuing next cycle."
                 return 
             }
 
             if ($vm.VMHost.Name -eq $targetHostName) { continue }
 
             if (Test-VmMigrating -VM $vm) {
-                Write-Log -Message "[AFFINITE] VM '$($vm.Name)' déjà en cours de migration, ignorée."
+                Write-Log -Message "[AFFINITY] VM '$($vm.Name)' already migrating, skipped."
                 continue
             }
 
             if (-not (Test-StorageCompatible -VM $vm -TargetHost $targetHost)) {
-                Write-Log -Message " -Level Warning[AFFINITE] VM '$($vm.Name)' incompatible stockage avec $targetHostName. Recherche d'un hôte alternatif..."
+                Write-Log -Message "[AFFINITY] VM '$($vm.Name)' storage-incompatible with $targetHostName. Searching for alternative host..." -Level Warning
                 
                 $alternativeHost = $null
                 foreach ($testHost in $allHosts) {
@@ -441,12 +559,12 @@ function Enforce-AffinityGroups {
                     $targetHost = $alternativeHost
                     $targetHostName = $alternativeHost.Name
                 } else {
-                    Write-Log -Message " -Level Warning[AFFINITE] Aucun hôte compatible trouvé pour '$($vm.Name)'. Migration ignorée."
+                    Write-Log -Message "[AFFINITY] No compatible host found for '$($vm.Name)'. Migration skipped." -Level Warning
                     continue
                 }
             }
 
-            $msg = "[AFFINITE] Regroupement VM '$($vm.Name)' : $($vm.VMHost.Name) -> $targetHostName"
+            $msg = "[AFFINITY] Grouping VM '$($vm.Name)' : $($vm.VMHost.Name) -> $targetHostName"
 
             if ($DryRun) {
                 Write-Log -Message "[DRYRUN] $msg"
@@ -460,17 +578,19 @@ function Enforce-AffinityGroups {
     }
 
     if ($movesDone -eq 0) {
-        Write-Log -Message "[AFFINITE] Tous les groupes sont déjà correctement regroupés."
+        Write-Log -Message "[AFFINITY] All groups are already properly grouped."
     }
 }
 
-# ---------- Gestion fichier anti-affinité ----------
+#endregion
 
+
+#region Anti-Affinity Management
 function Read-AntiAffinityList {
     param([string]$FilePath)
     
     if (-not (Test-Path $FilePath)) {
-        Write-Log -Message " -Level WarningFichier d'anti-affinité introuvable : $FilePath"
+        Write-Log -Message "Anti-affinity file not found: $FilePath" -Level Warning
         return @()
     }
     
@@ -487,13 +607,13 @@ function Read-AntiAffinityList {
                 VMs = $vmNames
             }
             [void]$groups.Add($groupObj)
-            Write-Log -Message "[ANTI-AFFINITE] Groupe chargé: [$($vmNames -join ', ')] ($($vmNames.Count) VMs)"
+            Write-Log -Message "[ANTI-AFFINITY] Group loaded: [$($vmNames -join ', ')] ($($vmNames.Count) VMs)"
         } elseif ($vmNames.Count -eq 1) {
-            Write-Log -Message " -Level Warning[ANTI-AFFINITE] Ligne ignorée (une seule VM): $($vmNames[0])"
+            Write-Log -Message "[ANTI-AFFINITY] Line skipped (single VM): $($vmNames[0])" -Level Warning
         }
     }
     
-    Write-Log -Message "Fichier d'anti-affinité chargé : $($groups.Count) groupe(s) détecté(s)"
+    Write-Log -Message "Anti-affinity file loaded: $($groups.Count) group(s) detected"
     
     return @($groups.ToArray())
 }
@@ -513,14 +633,14 @@ function Enforce-AntiAffinityGroups {
         return 
     }
 
-    Write-Log -Message "[ANTI-AFFINITE] Vérification et séparation des VMs selon les règles d'anti-affinité..."
+    Write-Log -Message "[ANTI-AFFINITY] Checking and separating VMs according to anti-affinity rules..."
 
     $clusterObj = Get-Cluster -Name $ClusterName -ErrorAction Stop
     $allHosts = Get-VMHost -Location $clusterObj | Where-Object { $_.ConnectionState -eq 'Connected' }
     $allClusterVMs = Get-VM -Location $clusterObj -ErrorAction SilentlyContinue
 
     if ($allHosts.Count -lt 2) {
-        Write-Log -Message " -Level Warning[ANTI-AFFINITE] Moins de 2 hôtes disponibles, impossible d'appliquer les règles."
+        Write-Log -Message "[ANTI-AFFINITY] Less than 2 hosts available, cannot apply rules." -Level Warning
         return
     }
 
@@ -531,15 +651,15 @@ function Enforce-AntiAffinityGroups {
         $groupIndex++
         
         if ($movesDone -ge $MaxMigrations) { 
-            Write-Log -Message "[ANTI-AFFINITE] Limite de migrations atteinte ($MaxMigrations), suite au prochain cycle."
+            Write-Log -Message "[ANTI-AFFINITY] Limit reached ($MaxMigrations), continuing next cycle."
             return 
         }
 
         $group = $groupObj.VMs
         
-        Write-Log -Message "[ANTI-AFFINITE] ========================================="
-        Write-Log -Message "[ANTI-AFFINITE] Traitement du groupe $groupIndex/$($AntiAffinityGroups.Count)"
-        Write-Log -Message "[ANTI-AFFINITE] VMs attendues: [$($group -join ', ')]"
+        Write-Log -Message "[ANTI-AFFINITY] ========================================="
+        Write-Log -Message "[ANTI-AFFINITY] Processing group $groupIndex/$($AntiAffinityGroups.Count)"
+        Write-Log -Message "[ANTI-AFFINITY] Expected VMs: [$($group -join ', ')]"
 
         $groupVMs = @()
         foreach ($vmName in $group) {
@@ -559,7 +679,7 @@ function Enforce-AntiAffinityGroups {
         }
 
         if ($groupVMs.Count -le 1) { 
-            Write-Log -Message "[ANTI-AFFINITE] ⚠ Groupe ignoré (moins de 2 VMs actives)"
+            Write-Log -Message "[ANTI-AFFINITY] ⚠ Group skipped (less than 2 active VMs)"
             continue 
         }
 
@@ -567,11 +687,11 @@ function Enforce-AntiAffinityGroups {
         $violations = $vmsByHost | Where-Object { $_.Count -gt 1 }
 
         if (-not $violations) {
-            Write-Log -Message "[ANTI-AFFINITE] ✓ Groupe OK - Toutes les VMs sont sur des hôtes différents"
+            Write-Log -Message "[ANTI-AFFINITY] ✓ Group OK - All VMs are on different hosts"
             continue
         }
 
-        Write-Log -Message "[ANTI-AFFINITE] ✗✗✗ VIOLATION DETECTEE ! ✗✗✗"
+        Write-Log -Message "[ANTI-AFFINITY] ✗✗✗ VIOLATION DETECTED! ✗✗✗"
 
         foreach ($violation in $violations) {
             if ($movesDone -ge $MaxMigrations) { return }
@@ -599,7 +719,7 @@ function Enforce-AntiAffinityGroups {
 
                 $bestTarget = Get-BestTargetHost -ESXHosts $candidateHosts -IncludeNetwork:$IncludeNetwork
 
-                $msg = "[ANTI-AFFINITE] ➜ Migration VM '$($vm.Name)' : $($vm.VMHost.Name) → $($bestTarget.ESXHost.Name)"
+                $msg = "[ANTI-AFFINITY] ➜ Migrating VM '$($vm.Name)' : $($vm.VMHost.Name) → $($bestTarget.ESXHost.Name)"
 
                 if ($DryRun) {
                     Write-Log -Message "[DRYRUN] $msg"
@@ -608,7 +728,7 @@ function Enforce-AntiAffinityGroups {
                     try {
                         Move-VM -VM $vm -Destination $bestTarget.ESXHost -RunAsync -ErrorAction Stop | Out-Null
                     } catch {
-                        Write-Log -Message " -Level Warning[ANTI-AFFINITE] Erreur migration: $_"
+                        Write-Log -Message "[ANTI-AFFINITY] Migration error: $_" -Level Warning
                         continue
                     }
                 }
@@ -619,7 +739,7 @@ function Enforce-AntiAffinityGroups {
     }
 
     if ($movesDone -eq 0) {
-        Write-Log -Message "[ANTI-AFFINITE] ✓ Toutes les règles d'anti-affinité sont respectées"
+        Write-Log -Message "[ANTI-AFFINITY] ✓ All anti-affinity rules are respected"
     }
 }
 
@@ -679,13 +799,15 @@ function Get-AntiAffinityCompatibleHosts {
     return $compatibleHosts
 }
 
-# ---------- Gestion fichier VM-to-Host ----------
+#endregion
 
+
+#region VM-to-Host Management
 function Read-VmToHostList {
     param([string]$FilePath)
     
     if (-not (Test-Path $FilePath)) {
-        Write-Log -Message " -Level WarningFichier VM-to-Host introuvable : $FilePath"
+        Write-Log -Message "VM-to-Host file not found: $FilePath" -Level Warning
         return @()
     }
     
@@ -703,7 +825,6 @@ function Read-VmToHostList {
         $hosts = @()
         
         foreach ($elem in $elements) {
-            # Détection: si contient 'esx', 'host', '-mgt' ou '.' c'est un hôte
             if ($elem -match 'esx|host|-mgt|\.') {
                 $hosts += $elem
             } else {
@@ -719,10 +840,10 @@ function Read-VmToHostList {
         }
         
         [void]$rules.Add($ruleObj)
-        Write-Log -Message "[VM-TO-HOST] Règle chargée: VMs=[$($vms -join ', ')] → Hosts=[$($hosts -join ', ')]"
+        Write-Log -Message "[VM-TO-HOST] Rule loaded: VMs=[$($vms -join ', ')] → Hosts=[$($hosts -join ', ')]"
     }
     
-    Write-Log -Message "Fichier VM-to-Host chargé : $($rules.Count) règle(s) détectée(s)"
+    Write-Log -Message "VM-to-Host file loaded: $($rules.Count) rule(s) detected"
     
     return @($rules.ToArray())
 }
@@ -794,7 +915,7 @@ function Enforce-VmToHostRules {
         return 
     }
 
-    Write-Log -Message "[VM-TO-HOST] Vérification et application des règles VM-to-Host..."
+    Write-Log -Message "[VM-TO-HOST] Checking and applying VM-to-Host rules..."
 
     $clusterObj = Get-Cluster -Name $ClusterName -ErrorAction Stop
     $allClusterVMs = Get-VM -Location $clusterObj -ErrorAction SilentlyContinue
@@ -807,14 +928,14 @@ function Enforce-VmToHostRules {
         $ruleIndex++
         
         if ($movesDone -ge $MaxMigrations) { 
-            Write-Log -Message "[VM-TO-HOST] Limite de migrations atteinte ($MaxMigrations)"
+            Write-Log -Message "[VM-TO-HOST] Migration limit reached ($MaxMigrations)"
             return 
         }
 
         $vms = $ruleObj.VMs
         $hosts = $ruleObj.Hosts
 
-        Write-Log -Message "[VM-TO-HOST] Règle $ruleIndex : VMs=[$($vms -join ', ')] → Hosts=[$($hosts -join ', ')]"
+        Write-Log -Message "[VM-TO-HOST] Rule $ruleIndex : VMs=[$($vms -join ', ')] → Hosts=[$($hosts -join ', ')]"
 
         $allowedHostObjects = @()
         foreach ($hostName in $hosts) {
@@ -872,12 +993,14 @@ function Enforce-VmToHostRules {
     }
 
     if ($movesDone -eq 0) {
-        Write-Log -Message "[VM-TO-HOST] ✓ Toutes les règles VM-to-Host sont respectées"
+        Write-Log -Message "[VM-TO-HOST] ✓ All VM-to-Host rules are respected"
     }
 }
 
-# ---------- Helpers charge hôte ----------
+#endregion
 
+
+#region Helper Functions
 function Get-HostLoad {
     param(
         [VMware.VimAutomation.ViCore.Impl.V1.Inventory.VMHostImpl]$ESXHost,
@@ -902,6 +1025,10 @@ function Get-HostLoad {
                          -ErrorAction SilentlyContinue
         if ($stat) {
             $netUsageKbps = [int]($stat.Value | Measure-Object -Average).Average
+        }
+
+        if ($stat) {
+            Remove-Variable -Name stat -ErrorAction SilentlyContinue
         }
     }
 
@@ -933,8 +1060,6 @@ function Get-BestTargetHost {
     } | Sort-Object LoadScore | Select-Object -First 1
 }
 
-# ---------- Helpers blacklist VMs ----------
-
 function Test-VmBlacklisted {
     param(
         [VMware.VimAutomation.ViCore.Impl.V1.Inventory.VirtualMachineImpl]$VM,
@@ -960,8 +1085,6 @@ function Test-VmBlacklisted {
 
     return $false
 }
-
-# ---------- Vérification migration VM en cours ----------
 
 function Test-VmMigrating {
     param(
@@ -997,8 +1120,6 @@ function Test-VmMigrating {
     return $false
 }
 
-# ---------- Compatibilité stockage VM / hôte cible ----------
-
 function Test-StorageCompatible {
     param(
         [VMware.VimAutomation.ViCore.Impl.V1.Inventory.VirtualMachineImpl]$VM,
@@ -1014,7 +1135,7 @@ function Test-StorageCompatible {
     } | Sort-Object -Unique
 
     foreach ($ds in $vmDsNames) {
-        if ($ds -like 'SHARED_STORAGE*') { continue }
+        if ($ds -like 'MYDATASTORE*') { continue }
 
         if ($targetDsNames -notcontains $ds) {
             return $false
@@ -1023,8 +1144,6 @@ function Test-StorageCompatible {
 
     return $true
 }
-
-# ---------- Comptage vMotions en cours ----------
 
 function Get-CurrentVmotionCount {
     param([string]$ClusterName)
@@ -1044,8 +1163,6 @@ function Get-CurrentVmotionCount {
 
     return ($tasks | Measure-Object).Count
 }
-
-# ---------- Détection des hôtes à évacuer ----------
 
 function Get-HostsNeedingEvacuation {
     param(
@@ -1136,8 +1253,10 @@ function Get-HostsNeedingEvacuation {
     return $allCandidates
 }
 
-# ---------- Evacuation des hôtes détectés (VMs moyennes restantes) ----------
+#endregion
 
+
+#region Evacuation
 function Evacuate-Hosts {
     param(
         [Parameter(Mandatory)]
@@ -1157,11 +1276,10 @@ function Evacuate-Hosts {
 
     $clusterObj = Get-Cluster -Name $ClusterName -ErrorAction Stop
 
-    # vMotions déjà en cours à l'entrée dans la fonction
     $nbEnCours = Get-CurrentVmotionCount -ClusterName $ClusterName
     $slotsDispoInitial = $MaxMigrationsEvacTotal - $nbEnCours
     if ($slotsDispoInitial -le 0) {
-        Write-Log -Message "Aucun slot de vMotion disponible (déjà $nbEnCours en cours / $MaxMigrationsEvacTotal), on attend la prochaine boucle."
+        Write-Log -Message "No vMotion slot available (already $nbEnCours in progress / $MaxMigrationsEvacTotal), waiting for next loop."
         return
     }
 
@@ -1169,7 +1287,7 @@ function Evacuate-Hosts {
 
     foreach ($mmESX in $HostsToEvacuate) {
         Write-Log -Message "========================================="
-        Write-Log -Message "Evacuation de l'hôte (maintenance ou entrée en maintenance) : $($mmESX.Name)"
+        Write-Log -Message "Evacuating host: $($mmESX.Name)"
         Write-Log -Message "========================================="
 
         $targetHosts = Get-VMHost -Location $clusterObj |
@@ -1178,11 +1296,10 @@ function Evacuate-Hosts {
                        }
 
         if (-not $targetHosts) {
-            Write-Log -Message " -Level WarningAucun hôte cible disponible pour $($mmESX.Name)"
+            Write-Log -Message "No target host available for $($mmESX.Name)" -Level Warning
             continue
         }
 
-        # Récupérer TOUTES les VMs candidates sur cet hôte
         $vmCandidates = $mmESX | Get-VM | Where-Object {
             $_.PowerState -eq 'PoweredOn' -and
             -not (Test-VmBlacklisted -VM $_ `
@@ -1191,13 +1308,12 @@ function Evacuate-Hosts {
         }
 
         if (-not $vmCandidates) {
-            Write-Log -Message "Aucune VM à évacuer sur $($mmESX.Name)"
+            Write-Log -Message "No VM to evacuate on $($mmESX.Name)"
             continue
         }
 
-        Write-Log -Message "Nombre de VMs à évacuer : $($vmCandidates.Count)"
+        Write-Log -Message "Number of VMs to evacuate: $($vmCandidates.Count)"
 
-        # Calculer la médiane des VMs restantes
         $sizes = $vmCandidates | Select-Object -ExpandProperty MemoryGB | Sort-Object
         $count = $sizes.Count
         if ($count -eq 0) { continue }
@@ -1209,101 +1325,82 @@ function Evacuate-Hosts {
             $medianSize = ($sizes[($count/2)-1] + $sizes[($count/2)]) / 2
         }
 
-        Write-Log -Message "Taille médiane des VMs : $medianSize GB"
+        Write-Log -Message "Median VM size: $medianSize GB"
 
-        # Prendre les VMs les plus proches de la médiane (limitées par les slots disponibles initiaux)
         $vmsToMove = $vmCandidates |
             Sort-Object @{Expression = { [math]::Abs($_.MemoryGB - $medianSize) }; Ascending = $true} |
             Select-Object -First $slotsDispoInitial
 
-        Write-Log -Message "VMs sélectionnées pour migration (proches médiane) : $($vmsToMove.Count)"
+        Write-Log -Message "VMs selected for migration: $($vmsToMove.Count)"
         Write-Log -Message "-----------------------------------------"
 
         foreach ($vm in $vmsToMove) {
-            # Vérifier si la VM est déjà en cours de migration
             if (Test-VmMigrating -VM $vm) {
-                Write-Log -Message "VM '$($vm.Name)' déjà en cours de migration, ignorée."
+                Write-Log -Message "VM '$($vm.Name)' already migrating, skipped."
                 continue
             }
 
-            # Recalcule dynamique des slots disponibles pour tenir compte des tâches réellement en cours
             $nbEnCours = Get-CurrentVmotionCount -ClusterName $ClusterName
             $slotsDispo = $MaxMigrationsEvacTotal - ($nbEnCours + $movesThisLoop)
             if ($slotsDispo -le 0) {
-                Write-Log -Message "Slots de vMotion disponibles consommés pour cette boucle, on attend la prochaine itération."
+                Write-Log -Message "vMotion slots consumed for this loop."
                 return
             }
 
-            # Filtrer les hôtes cibles compatibles stockage
             $compatibleTargets = $targetHosts | Where-Object {
                 Test-StorageCompatible -VM $vm -TargetHost $_
             }
 
             if (-not $compatibleTargets) {
-                Write-Log -Message " -Level WarningAucun hôte cible compatible stockage pour la VM '$($vm.Name)' (Memory $($vm.MemoryGB)GB). vMotion ignoré et slot NON consommé."
+                Write-Log -Message "No target host with compatible storage for VM '$($vm.Name)'" -Level Warning
                 continue
             }
 
-            # ===== MODE EVACUATION : Priorité absolue avec fallback =====
-            # En mode maintenance, on respecte l'ordre suivant :
-            # 1. VM-to-Host (si hôte autorisé != hôte en maintenance)
-            # 2. Affinité (si hôte cible != hôte en maintenance)
-            # 3. Anti-affinité (best effort)
-            # 4. Meilleur hôte disponible (FALLBACK OBLIGATOIRE)
-
             $bestTarget = $null
-            $migrationReason = "équilibrage"
+            $migrationReason = "balancing"
 
-            # Priorité 1: VM-to-Host (seulement si hôte cible valide et pas en maintenance)
             $vmToHostTarget = Get-VmToHostTargetHost -VMName $vm.Name -VmToHostRules $VmToHostRules -ClusterName $ClusterName -VM $vm
             if ($vmToHostTarget -and ($compatibleTargets.Name -contains $vmToHostTarget.Name)) {
                 $bestTarget = Get-HostLoad -ESXHost $vmToHostTarget -IncludeNetwork:$IncludeNetwork
                 $migrationReason = "VM-TO-HOST"
-                Write-Log -Message "[EVACUATION][VM-TO-HOST] VM '$($vm.Name)' dirigée vers '$($vmToHostTarget.Name)' (règle respectée)"
+                Write-Log -Message "[EVACUATION][VM-TO-HOST] VM '$($vm.Name)' directed to '$($vmToHostTarget.Name)'"
             } elseif ($vmToHostTarget) {
-                Write-Log -Message " -Level Warning[EVACUATION][VM-TO-HOST] VM '$($vm.Name)' devrait aller sur '$($vmToHostTarget.Name)' mais cet hôte est en maintenance ou incompatible. Règle VM-to-Host SUSPENDUE pour évacuation."
+                Write-Log -Message "[EVACUATION][VM-TO-HOST] VM '$($vm.Name)' target host in maintenance. Rule suspended." -Level Warning
             }
 
-            # Priorité 2: Affinité (seulement si hôte cible valide et pas en maintenance)
             if (-not $bestTarget) {
                 $affinityHost = Get-AffinityTargetHost -VMName $vm.Name -AffinityGroups $AffinityGroups -ClusterName $ClusterName -VM $vm
                 if ($affinityHost -and ($compatibleTargets.Name -contains $affinityHost.Name)) {
                     $bestTarget = Get-HostLoad -ESXHost $affinityHost -IncludeNetwork:$IncludeNetwork
-                    $migrationReason = "AFFINITE"
-                    Write-Log -Message "[EVACUATION][AFFINITE] VM '$($vm.Name)' dirigée vers '$($affinityHost.Name)' (groupe respecté)"
+                    $migrationReason = "AFFINITY"
+                    Write-Log -Message "[EVACUATION][AFFINITY] VM '$($vm.Name)' directed to '$($affinityHost.Name)'"
                 } elseif ($affinityHost) {
-                    Write-Log -Message " -Level Warning[EVACUATION][AFFINITE] VM '$($vm.Name)' devrait aller sur '$($affinityHost.Name)' mais cet hôte est en maintenance ou incompatible. Règle d'affinité SUSPENDUE pour évacuation."
+                    Write-Log -Message "[EVACUATION][AFFINITY] VM '$($vm.Name)' target host in maintenance. Rule suspended." -Level Warning
                 }
             }
 
-            # Priorité 3: Anti-affinité (best effort)
             if (-not $bestTarget) {
                 $antiAffinityTargets = Get-AntiAffinityCompatibleHosts -VM $vm -TargetHosts $compatibleTargets -AntiAffinityGroups $AntiAffinityGroups -ClusterName $ClusterName
                 
                 if ($antiAffinityTargets -and $antiAffinityTargets.Count -gt 0) {
                     $bestTarget = Get-BestTargetHost -ESXHosts $antiAffinityTargets -IncludeNetwork:$IncludeNetwork
-                    $migrationReason = "ANTI-AFFINITE"
-                    Write-Log -Message "[EVACUATION][ANTI-AFFINITE] VM '$($vm.Name)' vers hôte respectant anti-affinité"
-                } else {
-                    Write-Log -Message "[EVACUATION][ANTI-AFFINITE] Aucun hôte disponible respectant les contraintes d'anti-affinité pour '$($vm.Name)'. Règle SUSPENDUE pour évacuation."
+                    $migrationReason = "ANTI-AFFINITY"
+                    Write-Log -Message "[EVACUATION][ANTI-AFFINITY] VM '$($vm.Name)' placed respecting anti-affinity"
                 }
             }
 
-            # FALLBACK OBLIGATOIRE : Si aucune règle n'a donné de cible valide
             if (-not $bestTarget) {
                 $bestTarget = Get-BestTargetHost -ESXHosts $compatibleTargets -IncludeNetwork:$IncludeNetwork
-                $migrationReason = "EVACUATION-FORCEE"
-                Write-Log -Message "[EVACUATION][FORCE] VM '$($vm.Name)' vers meilleur hôte disponible (règles d'affinité/VM-to-Host suspendues)"
+                $migrationReason = "FORCED-EVACUATION"
+                Write-Log -Message "[EVACUATION][FORCE] VM '$($vm.Name)' to best available host"
             }
 
-            # Vérification finale : Si toujours pas de cible (ne devrait jamais arriver)
             if (-not $bestTarget -or -not $bestTarget.ESXHost) {
-                Write-Log -Message " -Level Warning[EVACUATION][ERREUR CRITIQUE] Impossible de trouver un hôte cible pour '$($vm.Name)'. Migration annulée."
-                Write-Log -Message " -Level Warning[EVACUATION][DEBUG] compatibleTargets Count: $($compatibleTargets.Count)"
+                Write-Log -Message "[EVACUATION] Cannot find target host for '$($vm.Name)'" -Level Warning
                 continue
             }
 
-            $msg = "[EVACUATION][$migrationReason] VM '$($vm.Name)' (Mem: $($vm.MemoryGB)GB) : $($vm.VMHost.Name) → $($bestTarget.ESXHost.Name) (charge: $($bestTarget.LoadScore))"
+            $msg = "[EVACUATION][$migrationReason] VM '$($vm.Name)' (Mem: $($vm.MemoryGB)GB) : $($vm.VMHost.Name) → $($bestTarget.ESXHost.Name)"
 
             if ($DryRun) {
                 Write-Log -Message "[DRYRUN] $msg"
@@ -1311,9 +1408,9 @@ function Evacuate-Hosts {
                 Write-Host $msg
                 try {
                     Move-VM -VM $vm -Destination $bestTarget.ESXHost -RunAsync -ErrorAction Stop | Out-Null
-                    Write-Log -Message "[EVACUATION] ✓✓✓ Migration lancée avec succès ✓✓✓"
+                    Write-Log -Message "[EVACUATION] ✓ Migration launched successfully"
                 } catch {
-                    Write-Log -Message " -Level Warning[EVACUATION] ✗✗✗ Erreur lors de la migration de '$($vm.Name)': $_"
+                    Write-Log -Message "[EVACUATION] ✗ Migration error: $_" -Level Warning
                     continue
                 }
             }
@@ -1325,13 +1422,15 @@ function Evacuate-Hosts {
 
     if ($movesThisLoop -gt 0) {
         Write-Log -Message "========================================="
-        Write-Log -Message "EVACUATION: $movesThisLoop migration(s) lancée(s) pour évacuation"
+        Write-Log -Message "EVACUATION: $movesThisLoop migration(s) launched"
         Write-Log -Message "========================================="
     }
 }
 
-# ---------- Rééquilibrage cluster ----------
+#endregion
 
+
+#region Balancing
 function Balance-Cluster {
     param(
         [string]$ClusterName,
@@ -1369,7 +1468,7 @@ function Balance-Cluster {
     } | Sort-Object LoadScore
 
     if (-not $overloaded -or -not $underloaded) {
-        Write-Log -Message "Pas de déséquilibre significatif détecté."
+        Write-Log -Message "No significant imbalance detected."
         return
     }
 
@@ -1410,28 +1509,25 @@ function Balance-Cluster {
 
             if (-not (Test-StorageCompatible -VM $candidate -TargetHost $dst.ESXHost)) { continue }
 
-            # Vérifier VM-to-Host
             $vmToHostTarget = Get-VmToHostTargetHost -VMName $candidate.Name -VmToHostRules $VmToHostRules -ClusterName $ClusterName -VM $candidate
             if ($vmToHostTarget -and $vmToHostTarget.Name -ne $dst.ESXHost.Name) {
-                Write-Log -Message "[VM-TO-HOST] VM '$($candidate.Name)' doit aller sur '$($vmToHostTarget.Name)'. Rééquilibrage annulé."
+                Write-Log -Message "[VM-TO-HOST] VM '$($candidate.Name)' must go to '$($vmToHostTarget.Name)'. Rebalancing cancelled."
                 continue
             }
 
-            # Vérifier affinité
             $affinityHost = Get-AffinityTargetHost -VMName $candidate.Name -AffinityGroups $AffinityGroups -ClusterName $ClusterName -VM $candidate
             if ($affinityHost -and $affinityHost.Name -ne $dst.ESXHost.Name) {
-                Write-Log -Message "[AFFINITE] VM '$($candidate.Name)' doit rester avec son groupe. Rééquilibrage annulé."
+                Write-Log -Message "[AFFINITY] VM '$($candidate.Name)' must stay with its group. Rebalancing cancelled."
                 continue
             }
 
-            # Vérifier anti-affinité
             $compatibleHosts = Get-AntiAffinityCompatibleHosts -VM $candidate -TargetHosts @($dst.ESXHost) -AntiAffinityGroups $AntiAffinityGroups -ClusterName $ClusterName
             if (-not $compatibleHosts) {
-                Write-Log -Message "[ANTI-AFFINITE] VM '$($candidate.Name)' ne peut pas aller sur '$($dst.ESXHost.Name)'. Rééquilibrage annulé."
+                Write-Log -Message "[ANTI-AFFINITY] VM '$($candidate.Name)' cannot go to '$($dst.ESXHost.Name)'. Rebalancing cancelled."
                 continue
             }
 
-            $msg = "Rééquilibrage $($candidate.Name) : $($src.ESXHost.Name) -> $($dst.ESXHost.Name)"
+            $msg = "Rebalancing $($candidate.Name) : $($src.ESXHost.Name) -> $($dst.ESXHost.Name)"
 
             if ($DryRun) {
                 Write-Log -Message "[DRYRUN] $msg"
@@ -1445,13 +1541,41 @@ function Balance-Cluster {
     }
 }
 
-# ---------- Boucle principale ----------
+#endregion
 
+
+#region Main Loop
 while ($true) {
     try {
-        Write-Log -Message "---- Itération $(Get-Date) : cluster $clusterNameLocal ----"
+        # Automatic garbage collection every 12h
+        $timeSinceLastGC = (Get-Date) - $script:lastGarbageCollection
+        if ($timeSinceLastGC.TotalHours -ge $script:gcIntervalHours) {
+            Write-Log -Message "[MEMORY] ⏰ Running automatic garbage collection" -Level Info
+            Invoke-MemoryCleanup
+        }
 
-        # Recharger les fichiers toutes les 5 minutes
+        # vCenter recycling every 24h
+        $timeSinceLastRecycle = (Get-Date) - $script:lastVCenterRecycle
+        if ($timeSinceLastRecycle.TotalHours -ge $script:vcRecycleIntervalHours) {
+            Write-Log -Message "[MEMORY] ⏰ Running vCenter recycle" -Level Info
+            $recycleSuccess = Invoke-VCenterRecycle -VCenter $vCenter -Credential $credential
+
+            if (-not $recycleSuccess) {
+                Write-Log -Message "[MEMORY] ⚠️ vCenter recycle failed, will retry next iteration" -Level Warning
+            }
+        }
+
+        # Memory monitoring every hour
+        $timeSinceLastMonitor = (Get-Date) - $script:lastMemoryMonitor
+        if ($timeSinceLastMonitor.TotalHours -ge $script:memoryMonitorIntervalHours) {
+            Show-MemoryUsage
+        }
+
+        # Statistics cache cleanup
+        Clear-StatisticsCache
+
+        Write-Log -Message "---- Iteration $(Get-Date) : cluster $clusterNameLocal ----"
+
         if ($null -eq $script:lastAffinityLoad -or ((Get-Date) - $script:lastAffinityLoad).TotalSeconds -ge $AffinityCheckIntervalSeconds) {
             $script:affinityGroups = Read-AffinityList -FilePath $AffinityListPath
             $script:lastAffinityLoad = Get-Date
@@ -1467,7 +1591,6 @@ while ($true) {
             $script:lastVmToHostLoad = Get-Date
         }
 
-        # Application des règles à chaque cycle
         
         if ($script:affinityGroups.Count -gt 0) {
             Enforce-AffinityGroups `
@@ -1519,7 +1642,7 @@ while ($true) {
 
             if ($hostsWithVMs) {
                 if (-not $script:wasInEvacuationMode) {
-                    Write-Log -Message "*** Passage en mode évacuation (boucle courte ${EvacLoopSleepSeconds}s) ***"
+                    Write-Log -Message "*** Switching to evacuation mode (short loop ${EvacLoopSleepSeconds}s) ***"
                     $script:wasInEvacuationMode = $true
                 }
 
@@ -1539,7 +1662,7 @@ while ($true) {
             }
             else {
                 if ($script:wasInEvacuationMode) {
-                    Write-Log -Message "*** EVACUATION TERMINÉE ! Retour au mode normal (${NormalLoopSleepSeconds}s). ***"
+                    Write-Log -Message "*** EVACUATION COMPLETE! Returning to normal mode (${NormalLoopSleepSeconds}s). ***"
                     $script:wasInEvacuationMode = $false
                 }
 
@@ -1563,7 +1686,7 @@ while ($true) {
         }
         else {
             if ($script:wasInEvacuationMode) {
-                Write-Log -Message "*** Plus d'hôtes en maintenance détectés. Retour au mode normal. ***"
+                Write-Log -Message "*** No more maintenance hosts detected. Returning to normal mode. ***"
                 $script:wasInEvacuationMode = $false
             }
 
@@ -1586,10 +1709,11 @@ while ($true) {
         }
     }
     catch {
-        Write-Log -Message " -Level WarningErreur dans la boucle pseudo-DRS (cluster $clusterNameLocal) : $_"
+        Write-Log -Message "Error in pseudo-DRS loop (cluster $clusterNameLocal) : $_" -Level Warning
         $sleep = $NormalLoopSleepSeconds
     }
 
-    Write-Log -Message "Pause de $sleep secondes..."
+    Write-Log -Message "Pausing for $sleep seconds..."
     Start-Sleep -Seconds $sleep
 }
+#endregion
