@@ -18,6 +18,16 @@ It provides advanced VM placement and load-balancing capabilities with support f
 
 ## Version History
 
+
+### v1.32 (2025-12-16)
+- Automatic garbage collection every 12h
+- vCenter recycling every 24h with automatic reconnection
+- Proper UDP disposal (Close + Dispose) in Send-SyslogMessage
+- Automatic Get-Stat cleanup after each use
+- Memory monitoring every hour with alerts
+- Automatic statistics cache cleanup
+- Automatic alerts if memory exceeds 2 GB
+
 ### v1.31 (2025-12-02)
 
 - Added Syslog support for centralized logging
