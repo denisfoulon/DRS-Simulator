@@ -19,6 +19,9 @@ It provides advanced VM placement and load-balancing capabilities with support f
 ## Version History
 
 
+### v1.33 (2026-01-16)
+- Migrations enhanced for evacuation
+
 ### v1.32 (2025-12-16)
 - Automatic garbage collection every 12h
 - vCenter recycling every 24h with automatic reconnection
