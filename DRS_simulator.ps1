@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    DRS Simulator Script - Version 1.32
+    DRS Simulator Script - Version 1.33
 
 .DESCRIPTION
     DRS-Simulator - Custom DRS Implementation for VMware vSphere
