@@ -1,23 +1,14 @@
 <#
 .SYNOPSIS
-    DRS Simulator Script - Version 1.33
+    DRS Simulator Script - Version 1.34
 
 .DESCRIPTION
     DRS-Simulator - Custom DRS Implementation for VMware vSphere
 
 .NOTES
-    Version: 1.33
+    Version: 1.34
     AUTHOR : Denis Foulon
     Date: 2026-16-01
-    What's new in v1.33:
-    - Migrations enhanced for evacuation
-
-    What's new in v1.33:
-    ✅ ESXi hosts can now be fully evacuated (PoweredOn + PoweredOff VMs)
-    ✅ VMware maintenance mode succeeds without residual VMs
-    ✅ Business rules respected for PoweredOn VMs
-    ✅ Pragmatic migration for PoweredOff VMs (storage compatibility only)
-
 
 .ABOUT
     This script simulates DRS-like behavior for VMware vSphere environments.
@@ -96,6 +87,25 @@ param(
     [switch]$DryRun
 )
 
+#Rules check frequency - check rules every X loops instead of every loop
+# Example: 15 = check every 15 minutes (with 60s loop), reducing CPU/IO load
+# Set to 1 to check every loop (original behavior)
+$RulesCheckEveryXLoops = 15
+
+# Loop counter for throttling
+$script:loopCounter = 0
+
+# Last check time variables (now using file LastWriteTime instead of timer)
+# These will be set to file timestamps, not DateTime
+$script:lastAffinityLoad = $null
+$script:lastAntiAffinityLoad = $null
+$script:lastVmToHostLoad = $null
+
+# Rule storage (cached between checks)
+$script:affinityGroups = @()
+$script:antiAffinityGroups = @()
+$script:vmToHostRules = @()
+# ===== FIN VARIABLES DE THROTTLING =====
 
 #region Memory Management Tracking Variables
 $script:lastGarbageCollection = Get-Date
@@ -1318,7 +1328,7 @@ function Evacuate-Hosts {
         Write-Log -Message "[EVACUATION] VMs to evacuate: $($vmsPoweredOn.Count) powered ON + $($vmsPoweredOff.Count) powered OFF = $($vmCandidates.Count) total"
 
         # ============================================================
-        # PART 1: PoweredOn VMs - Apply full rule logic
+        # PART 1: PoweredOn VMs - Storage compatibility FIRST, then apply rules
         # ============================================================
         foreach ($vm in $vmsPoweredOn) {
             # Dynamic recalculation of available slots
@@ -1336,22 +1346,28 @@ function Evacuate-Hosts {
                 continue
             }
 
-            # Filter storage-compatible target hosts
+            # ============================================================
+            # STEP 1: Get ALL storage-compatible hosts FIRST
+            # This is the HARD constraint - cannot be bypassed
+            # Storage compatibility > Business rules
+            # ============================================================
             $compatibleTargets = $targetHosts | Where-Object {
                 Test-StorageCompatible -VM $vm -TargetHost $_
             }
 
-            if (-not $compatibleTargets) {
-                Write-Log -Message "[EVACUATION] No target host with compatible storage for VM '$($vm.Name)' (Memory: $($vm.MemoryGB)GB, State: PoweredOn). vMotion skipped (slot NOT consumed)." -Level Warning
+            if (-not $compatibleTargets -or $compatibleTargets.Count -eq 0) {
+                Write-Log -Message "[EVACUATION][STORAGE] No target host with compatible storage for VM '$($vm.Name)' (Memory: $($vm.MemoryGB)GB). VM CANNOT be migrated!" -Level Error
                 continue
             }
 
+            Write-Log -Message "[EVACUATION][STORAGE] VM '$($vm.Name)' has $($compatibleTargets.Count) storage-compatible target(s)" -Level Debug
+
             # Variable to hold the selected target and migration reason
             $bestTarget = $null
-            $migrationReason = "balancing"
+            $migrationReason = "STORAGE-FALLBACK"
 
             # ============================================================
-            # PRIORITY 1: VM-to-Host (only if target host valid and available)
+            # STEP 2: Try to apply VM-to-Host rule (if target is storage-compatible)
             # ============================================================
             $vmToHostTarget = Get-VmToHostTargetHost -VMName $vm.Name `
                 -VmToHostRules $VmToHostRules `
@@ -1359,18 +1375,13 @@ function Evacuate-Hosts {
                 -VM $vm
 
             if ($vmToHostTarget -and ($compatibleTargets.Name -contains $vmToHostTarget.Name)) {
-                # VM-to-Host rule can be applied
                 $bestTarget = Get-HostLoad -ESXHost $vmToHostTarget -IncludeNetwork:$IncludeNetwork
                 $migrationReason = "VM-TO-HOST"
-                Write-Log -Message "[EVACUATION][VM-TO-HOST] VM '$($vm.Name)' directed to $($vmToHostTarget.Name) (rule respected)"
-            }
-            elseif ($vmToHostTarget) {
-                # VM-to-Host rule exists BUT target host is unavailable
-                Write-Log -Message "[EVACUATION][VM-TO-HOST] VM '$($vm.Name)' should go to $($vmToHostTarget.Name) but this host is in maintenance or incompatible. VM-to-Host rule SUSPENDED for evacuation (will use fallback)." -Level Warning
+                Write-Log -Message "[EVACUATION][VM-TO-HOST] VM '$($vm.Name)' → $($vmToHostTarget.Name) (règle respectée)" -Level Debug
             }
 
             # ============================================================
-            # PRIORITY 2: Affinity (only if no VM-to-Host was applied)
+            # STEP 3: Try to apply Affinity rule (if target is storage-compatible)
             # ============================================================
             if (-not $bestTarget) {
                 $affinityHost = Get-AffinityTargetHost -VMName $vm.Name `
@@ -1379,54 +1390,43 @@ function Evacuate-Hosts {
                     -VM $vm
 
                 if ($affinityHost -and ($compatibleTargets.Name -contains $affinityHost.Name)) {
-                    # Affinity rule can be applied
                     $bestTarget = Get-HostLoad -ESXHost $affinityHost -IncludeNetwork:$IncludeNetwork
                     $migrationReason = "AFFINITY"
-                    Write-Log -Message "[EVACUATION][AFFINITY] VM '$($vm.Name)' directed to $($affinityHost.Name) (group respected)"
-                }
-                elseif ($affinityHost) {
-                    # Affinity rule exists BUT target host is unavailable
-                    Write-Log -Message "[EVACUATION][AFFINITY] VM '$($vm.Name)' should go to $($affinityHost.Name) but this host is in maintenance or incompatible. Affinity rule SUSPENDED for evacuation (will use fallback)." -Level Warning
+                    Write-Log -Message "[EVACUATION][AFFINITY] VM '$($vm.Name)' → $($affinityHost.Name) (groupe respecté)" -Level Debug
                 }
             }
 
             # ============================================================
-            # PRIORITY 3: Anti-affinity (filtering only, best effort)
+            # STEP 4: Try to apply Anti-affinity filtering (on storage-compatible hosts)
             # ============================================================
             if (-not $bestTarget) {
-                # Apply anti-affinity filtering to compatible targets
                 $antiAffinityTargets = Get-AntiAffinityCompatibleHosts -VM $vm `
                     -TargetHosts $compatibleTargets `
                     -AntiAffinityGroups $AntiAffinityGroups `
                     -ClusterName $ClusterName
 
                 if ($antiAffinityTargets -and $antiAffinityTargets.Count -gt 0) {
-                    # Select best host among anti-affinity compatible hosts
                     $bestTarget = Get-BestTargetHost -ESXHosts $antiAffinityTargets -IncludeNetwork:$IncludeNetwork
                     $migrationReason = "ANTI-AFFINITY"
-                    Write-Log -Message "[EVACUATION][ANTI-AFFINITY] VM '$($vm.Name)' to host respecting anti-affinity"
-                }
-                else {
-                    Write-Log -Message "[EVACUATION][ANTI-AFFINITY] No host available respecting anti-affinity constraints for '$($vm.Name)'. Rule SUSPENDED for evacuation (will use forced fallback)." -Level Warning
+                    Write-Log -Message "[EVACUATION][ANTI-AFFINITY] VM '$($vm.Name)' (anti-affinity respectée)" -Level Debug
                 }
             }
 
             # ============================================================
-            # MANDATORY FALLBACK: If no rule has given a valid target
+            # STEP 5: MANDATORY FALLBACK - Use best storage-compatible host
+            # Storage compatibility is MANDATORY for evacuation
             # ============================================================
             if (-not $bestTarget) {
-                # FORCED evacuation: select best available host regardless of rules
                 $bestTarget = Get-BestTargetHost -ESXHosts $compatibleTargets -IncludeNetwork:$IncludeNetwork
-                $migrationReason = "FORCED-EVACUATION"
-                Write-Log -Message "[EVACUATION][FORCE] VM '$($vm.Name)' (State: PoweredOn) to best available host (affinity/VM-to-Host rules suspended due to maintenance)"
+                $migrationReason = "STORAGE-FALLBACK"
+                Write-Log -Message "[EVACUATION][STORAGE-FALLBACK] VM '$($vm.Name)' → $($bestTarget.ESXHost.Name) (aucune règle applicable, priorité stockage)" -Level Debug
             }
 
             # ============================================================
-            # Final check: If still no target (should never happen)
+            # Final sanity check
             # ============================================================
             if (-not $bestTarget -or -not $bestTarget.ESXHost) {
-                Write-Log -Message "[EVACUATION][CRITICAL ERROR] Impossible to find a target host for '$($vm.Name)'. Migration canceled." -Level Warning
-                Write-Log -Message "[EVACUATION][DEBUG] compatibleTargets Count: $($compatibleTargets.Count)" -Level Warning
+                Write-Log -Message "[EVACUATION][ERREUR] Impossible de sélectionner un hôte pour '$($vm.Name)' (storage incompatible sur TOUS les hôtes?)" -Level Error
                 continue
             }
 
@@ -1456,7 +1456,6 @@ function Evacuate-Hosts {
         # PART 2: PoweredOff VMs - SIMPLIFIED LOGIC
         # Just find ANY host with compatible storage, no rules applied
         # ============================================================
-
         foreach ($vm in $vmsPoweredOff) {
             # Dynamic recalculation of available slots
             $nbEnCours = Get-CurrentVmotionCount -ClusterName $ClusterName
@@ -1521,8 +1520,6 @@ function Evacuate-Hosts {
         Write-Log -Message "========================================="
     }
 }
-
-
 
 #region Balancing
 function Balance-Cluster {
@@ -1641,95 +1638,95 @@ function Balance-Cluster {
 #region Main Loop
 while ($true) {
     try {
-        # Automatic garbage collection every 12h
+        # ===== GESTION MÉMOIRE AUTOMATIQUE (v1.32) =====
+
+        # 1. Garbage Collection automatique toutes les 12h
         $timeSinceLastGC = (Get-Date) - $script:lastGarbageCollection
         if ($timeSinceLastGC.TotalHours -ge $script:gcIntervalHours) {
-            Write-Log -Message "[MEMORY] ⏰ Running automatic garbage collection" -Level Info
+            Write-Log -Message "[MEMORY] ⏰ Déclenchement du garbage collection automatique (dernière exécution: $($script:lastGarbageCollection))" -Level Info
             Invoke-MemoryCleanup
         }
 
-        # vCenter recycling every 24h
+        # 2. Recyclage vCenter toutes les 24h
         $timeSinceLastRecycle = (Get-Date) - $script:lastVCenterRecycle
         if ($timeSinceLastRecycle.TotalHours -ge $script:vcRecycleIntervalHours) {
-            Write-Log -Message "[MEMORY] ⏰ Running vCenter recycle" -Level Info
+            Write-Log -Message "[MEMORY] ⏰ Déclenchement du recyclage vCenter (dernière exécution: $($script:lastVCenterRecycle))" -Level Info
             $recycleSuccess = Invoke-VCenterRecycle -VCenter $vCenter -Credential $credential
 
             if (-not $recycleSuccess) {
-                Write-Log -Message "[MEMORY] ⚠️ vCenter recycle failed, will retry next iteration" -Level Warning
+                Write-Log -Message "[MEMORY] ⚠️ Échec du recyclage vCenter, tentative à la prochaine itération" -Level Warning
             }
         }
 
-        # Memory monitoring every hour
+        # 3. Monitoring mémoire toutes les heures
         $timeSinceLastMonitor = (Get-Date) - $script:lastMemoryMonitor
         if ($timeSinceLastMonitor.TotalHours -ge $script:memoryMonitorIntervalHours) {
             Show-MemoryUsage
         }
 
-        # Statistics cache cleanup
+        # 4. Nettoyage du cache des statistiques
         Clear-StatisticsCache
 
-        Write-Log -Message "---- Iteration $(Get-Date) : cluster $clusterNameLocal ----"
+        # ===== FIN GESTION MÉMOIRE =====
 
-        if ($null -eq $script:lastAffinityLoad -or ((Get-Date) - $script:lastAffinityLoad).TotalSeconds -ge $AffinityCheckIntervalSeconds) {
-            $script:affinityGroups = Read-AffinityList -FilePath $AffinityListPath
-            $script:lastAffinityLoad = Get-Date
+        # ⭐ NEW: Increment loop counter for throttling
+        $script:loopCounter++
+
+        Write-Log -Message "---- Iteration $(Get-Date) : cluster $clusterNameLocal (loop #$script:loopCounter) ----"
+
+        # ===== RULES LOADING AND ENFORCEMENT (OPTIMIZED) =====
+
+        # ⭐ NEW: Only check and reload rules every X loops
+        $shouldCheckRules = ($script:loopCounter % $RulesCheckEveryXLoops -eq 0)
+
+        if ($shouldCheckRules) {
+            Write-Log -Message "[RULES] Checking rule files (every $RulesCheckEveryXLoops loops)..." -Level Info
+
+            # Affinity rules - only reload if file changed
+            if (Test-Path $AffinityListPath) {
+                $currentAffinityWrite = (Get-Item $AffinityListPath).LastWriteTime
+                if ($currentAffinityWrite -ne $script:lastAffinityLoad) {
+                    $script:affinityGroups = Read-AffinityList -FilePath $AffinityListPath
+                    $script:lastAffinityLoad = $currentAffinityWrite
+                    Write-Log -Message "[RULES] Affinity rules reloaded ($($script:affinityGroups.Count) groups)"
+                }
+            }
+
+            # Anti-affinity rules - only reload if file changed
+            if (Test-Path $AntiAffinityListPath) {
+                $currentAntiAffinityWrite = (Get-Item $AntiAffinityListPath).LastWriteTime
+                if ($currentAntiAffinityWrite -ne $script:lastAntiAffinityLoad) {
+                    $script:antiAffinityGroups = Read-AntiAffinityList -FilePath $AntiAffinityListPath
+                    $script:lastAntiAffinityLoad = $currentAntiAffinityWrite
+                    Write-Log -Message "[RULES] Anti-affinity rules reloaded ($($script:antiAffinityGroups.Count) groups)"
+                }
+            }
+
+            # VM-to-Host rules - only reload if file changed
+            if (Test-Path $VmToHostListPath) {
+                $currentVmToHostWrite = (Get-Item $VmToHostListPath).LastWriteTime
+                if ($currentVmToHostWrite -ne $script:lastVmToHostLoad) {
+                    $script:vmToHostRules = Read-VmToHostList -FilePath $VmToHostListPath
+                    $script:lastVmToHostLoad = $currentVmToHostWrite
+                    Write-Log -Message "[RULES] VM-to-Host rules reloaded ($($script:vmToHostRules.Count) rules)"
+                }
+            }
+        }
+        else {
+            $loopsUntilCheck = $RulesCheckEveryXLoops - ($script:loopCounter % $RulesCheckEveryXLoops)
+            Write-Log -Message "[RULES] Using cached rules (will check in $loopsUntilCheck loops)" -Level Debug
         }
 
-        if ($null -eq $script:lastAntiAffinityLoad -or ((Get-Date) - $script:lastAntiAffinityLoad).TotalSeconds -ge $AntiAffinityCheckIntervalSeconds) {
-            $script:antiAffinityGroups = Read-AntiAffinityList -FilePath $AntiAffinityListPath
-            $script:lastAntiAffinityLoad = Get-Date
-        }
-
-        if ($null -eq $script:lastVmToHostLoad -or ((Get-Date) - $script:lastVmToHostLoad).TotalSeconds -ge $VmToHostCheckIntervalSeconds) {
-            $script:vmToHostRules = Read-VmToHostList -FilePath $VmToHostListPath
-            $script:lastVmToHostLoad = Get-Date
-        }
-
-        
-        if ($script:affinityGroups.Count -gt 0) {
-            Enforce-AffinityGroups `
-                -ClusterName $clusterNameLocal `
-                -AffinityGroups $script:affinityGroups `
-                -MaxMigrations $MaxMigrationsAffinityPerLoop `
-                -NameBlacklistPatterns $NameBlacklistPatterns `
-                -TagBlacklistNames $TagBlacklistNames `
-                -IncludeNetwork:$IncludeNetwork `
-                -DryRun:$DryRun
-        }
-
-        $antiAffinityArray = @($script:antiAffinityGroups)
-        if ($antiAffinityArray.Count -gt 0) {
-            Enforce-AntiAffinityGroups `
-                -ClusterName $clusterNameLocal `
-                -AntiAffinityGroups $antiAffinityArray `
-                -MaxMigrations $MaxMigrationsAntiAffinityPerLoop `
-                -NameBlacklistPatterns $NameBlacklistPatterns `
-                -TagBlacklistNames $TagBlacklistNames `
-                -IncludeNetwork:$IncludeNetwork `
-                -DryRun:$DryRun
-        }
-
-        $vmToHostArray = @($script:vmToHostRules)
-        if ($vmToHostArray.Count -gt 0) {
-            Enforce-VmToHostRules `
-                -ClusterName $clusterNameLocal `
-                -VmToHostRules $vmToHostArray `
-                -MaxMigrations $MaxMigrationsVmToHostPerLoop `
-                -NameBlacklistPatterns $NameBlacklistPatterns `
-                -TagBlacklistNames $TagBlacklistNames `
-                -IncludeNetwork:$IncludeNetwork `
-                -DryRun:$DryRun
-        }
+        # ===== HOST EVACUATION DETECTION =====
 
         $hostsNeedingEvac = Get-HostsNeedingEvacuation -ClusterName $clusterNameLocal
 
         if ($hostsNeedingEvac) {
             $hostsWithVMs = $hostsNeedingEvac | Where-Object {
                 $vmsToMove = $_ | Get-VM | Where-Object {
-                    $_.PowerState -eq 'PoweredOn' -and
                     -not (Test-VmBlacklisted -VM $_ `
-                            -NameBlacklistPatterns $NameBlacklistPatterns `
-                            -TagBlacklistNames $TagBlacklistNames)
+                        -NameBlacklistPatterns $NameBlacklistPatterns `
+                        -TagBlacklistNames $TagBlacklistNames)
                 }
                 ($vmsToMove | Measure-Object).Count -gt 0
             }
@@ -1740,6 +1737,7 @@ while ($true) {
                     $script:wasInEvacuationMode = $true
                 }
 
+                # ⭐ EVACUATION MODE: Always use rules (no throttling)
                 Evacuate-Hosts `
                     -HostsToEvacuate $hostsWithVMs `
                     -ClusterName $clusterNameLocal `
@@ -1756,10 +1754,51 @@ while ($true) {
             }
             else {
                 if ($script:wasInEvacuationMode) {
-                    Write-Log -Message "*** EVACUATION COMPLETE! Returning to normal mode (${NormalLoopSleepSeconds}s). ***"
+                    Write-Log -Message "*** EVACUATION TERMINÉE ! Retour au mode normal (${NormalLoopSleepSeconds}s). ***"
                     $script:wasInEvacuationMode = $false
                 }
 
+                # ⭐ NORMAL MODE: Use throttling (only enforce rules if checked this loop)
+                if ($shouldCheckRules) {
+                    # Apply rules at each cycle where rules are checked
+
+                    if ($script:affinityGroups.Count -gt 0) {
+                        Enforce-AffinityGroups `
+                            -ClusterName $clusterNameLocal `
+                            -AffinityGroups $script:affinityGroups `
+                            -MaxMigrations $MaxMigrationsAffinityPerLoop `
+                            -NameBlacklistPatterns $NameBlacklistPatterns `
+                            -TagBlacklistNames $TagBlacklistNames `
+                            -IncludeNetwork:$IncludeNetwork `
+                            -DryRun:$DryRun
+                    }
+
+                    $antiAffinityArray = @($script:antiAffinityGroups)
+                    if ($antiAffinityArray.Count -gt 0) {
+                        Enforce-AntiAffinityGroups `
+                            -ClusterName $clusterNameLocal `
+                            -AntiAffinityGroups $antiAffinityArray `
+                            -MaxMigrations $MaxMigrationsAntiAffinityPerLoop `
+                            -NameBlacklistPatterns $NameBlacklistPatterns `
+                            -TagBlacklistNames $TagBlacklistNames `
+                            -IncludeNetwork:$IncludeNetwork `
+                            -DryRun:$DryRun
+                    }
+
+                    $vmToHostArray = @($script:vmToHostRules)
+                    if ($vmToHostArray.Count -gt 0) {
+                        Enforce-VmToHostRules `
+                            -ClusterName $clusterNameLocal `
+                            -VmToHostRules $vmToHostArray `
+                            -MaxMigrations $MaxMigrationsVmToHostPerLoop `
+                            -NameBlacklistPatterns $NameBlacklistPatterns `
+                            -TagBlacklistNames $TagBlacklistNames `
+                            -IncludeNetwork:$IncludeNetwork `
+                            -DryRun:$DryRun
+                    }
+                }
+
+                # Always run cluster balancing
                 Balance-Cluster `
                     -ClusterName $clusterNameLocal `
                     -MaxMigrations $MaxMigrationsBalancePerLoop `
@@ -1779,11 +1818,53 @@ while ($true) {
             }
         }
         else {
+            # No hosts in evacuation mode
             if ($script:wasInEvacuationMode) {
                 Write-Log -Message "*** No more maintenance hosts detected. Returning to normal mode. ***"
                 $script:wasInEvacuationMode = $false
             }
 
+            # ⭐ NORMAL MODE: Use throttling (only enforce rules if checked this loop)
+            if ($shouldCheckRules) {
+                # Apply rules at each cycle where rules are checked
+
+                if ($script:affinityGroups.Count -gt 0) {
+                    Enforce-AffinityGroups `
+                        -ClusterName $clusterNameLocal `
+                        -AffinityGroups $script:affinityGroups `
+                        -MaxMigrations $MaxMigrationsAffinityPerLoop `
+                        -NameBlacklistPatterns $NameBlacklistPatterns `
+                        -TagBlacklistNames $TagBlacklistNames `
+                        -IncludeNetwork:$IncludeNetwork `
+                        -DryRun:$DryRun
+                }
+
+                $antiAffinityArray = @($script:antiAffinityGroups)
+                if ($antiAffinityArray.Count -gt 0) {
+                    Enforce-AntiAffinityGroups `
+                        -ClusterName $clusterNameLocal `
+                        -AntiAffinityGroups $antiAffinityArray `
+                        -MaxMigrations $MaxMigrationsAntiAffinityPerLoop `
+                        -NameBlacklistPatterns $NameBlacklistPatterns `
+                        -TagBlacklistNames $TagBlacklistNames `
+                        -IncludeNetwork:$IncludeNetwork `
+                        -DryRun:$DryRun
+                }
+
+                $vmToHostArray = @($script:vmToHostRules)
+                if ($vmToHostArray.Count -gt 0) {
+                    Enforce-VmToHostRules `
+                        -ClusterName $clusterNameLocal `
+                        -VmToHostRules $vmToHostArray `
+                        -MaxMigrations $MaxMigrationsVmToHostPerLoop `
+                        -NameBlacklistPatterns $NameBlacklistPatterns `
+                        -TagBlacklistNames $TagBlacklistNames `
+                        -IncludeNetwork:$IncludeNetwork `
+                        -DryRun:$DryRun
+                }
+            }
+
+            # Always run cluster balancing
             Balance-Cluster `
                 -ClusterName $clusterNameLocal `
                 -MaxMigrations $MaxMigrationsBalancePerLoop `
@@ -1810,4 +1891,3 @@ while ($true) {
     Write-Log -Message "Pausing for $sleep seconds..."
     Start-Sleep -Seconds $sleep
 }
-#endregion
