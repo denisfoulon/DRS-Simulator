@@ -6,23 +6,18 @@
     DRS-Simulator - Custom DRS Implementation for VMware vSphere
 
 .NOTES
-    Version: 1.32
+    Version: 1.33
     AUTHOR : Denis Foulon
-    Date: 2025-12-02
-    What's new in v1.31:
-    - Added Send-SyslogMessage function to send logs to remote server
-    - All logs are now sent via UDP to the log server
-    - Console display preserved in parallel
-    - Configurable Syslog parameters (server, port, facility)
+    Date: 2026-16-01
+    What's new in v1.33:
+    - Migrations enhanced for evacuation
 
-    What's new in v1.32:
-    - ✅ Automatic garbage collection every 12h
-    - ✅ vCenter recycling every 24h with automatic reconnection
-    - ✅ Proper UDP disposal (Close + Dispose) in Send-SyslogMessage
-    - ✅ Automatic Get-Stat cleanup after each use
-    - ✅ Memory monitoring every hour with alerts
-    - ✅ Automatic statistics cache cleanup
-    - ✅ Automatic alerts if memory exceeds 2 GB
+    What's new in v1.33:
+    ✅ ESXi hosts can now be fully evacuated (PoweredOn + PoweredOff VMs)
+    ✅ VMware maintenance mode succeeds without residual VMs
+    ✅ Business rules respected for PoweredOn VMs
+    ✅ Pragmatic migration for PoweredOff VMs (storage compatibility only)
+
 
 .ABOUT
     This script simulates DRS-like behavior for VMware vSphere environments.
@@ -1276,10 +1271,12 @@ function Evacuate-Hosts {
 
     $clusterObj = Get-Cluster -Name $ClusterName -ErrorAction Stop
 
+    # vMotions already in progress at function entry
     $nbEnCours = Get-CurrentVmotionCount -ClusterName $ClusterName
     $slotsDispoInitial = $MaxMigrationsEvacTotal - $nbEnCours
+
     if ($slotsDispoInitial -le 0) {
-        Write-Log -Message "No vMotion slot available (already $nbEnCours in progress / $MaxMigrationsEvacTotal), waiting for next loop."
+        Write-Log -Message "[EVACUATION] No vMotion slot available (already $nbEnCours in progress / $MaxMigrationsEvacTotal), waiting for next loop."
         return
     }
 
@@ -1287,147 +1284,244 @@ function Evacuate-Hosts {
 
     foreach ($mmESX in $HostsToEvacuate) {
         Write-Log -Message "========================================="
-        Write-Log -Message "Evacuating host: $($mmESX.Name)"
+        Write-Log -Message "[EVACUATION] Evacuating host (maintenance or entering maintenance): $($mmESX.Name)"
         Write-Log -Message "========================================="
 
-        $targetHosts = Get-VMHost -Location $clusterObj |
-                       Where-Object {
-                           $_.ConnectionState -eq 'Connected' -and $_.Name -ne $mmESX.Name
-                       }
+        # Get target hosts (all connected hosts EXCEPT the one in maintenance)
+        $targetHosts = Get-VMHost -Location $clusterObj | Where-Object {
+            $_.ConnectionState -eq 'Connected' -and $_.Name -ne $mmESX.Name
+        }
 
         if (-not $targetHosts) {
-            Write-Log -Message "No target host available for $($mmESX.Name)" -Level Warning
+            Write-Log -Message "[EVACUATION] No target host available for $($mmESX.Name)" -Level Warning
             continue
         }
 
+        # ============================================================
+        # Get ALL VMs (PoweredOn AND PoweredOff)
+        # ============================================================
         $vmCandidates = $mmESX | Get-VM | Where-Object {
-            $_.PowerState -eq 'PoweredOn' -and
             -not (Test-VmBlacklisted -VM $_ `
-                    -NameBlacklistPatterns $NameBlacklistPatterns `
-                    -TagBlacklistNames $TagBlacklistNames)
+                -NameBlacklistPatterns $NameBlacklistPatterns `
+                -TagBlacklistNames $TagBlacklistNames)
         }
 
-        if (-not $vmCandidates) {
-            Write-Log -Message "No VM to evacuate on $($mmESX.Name)"
+        if (-not $vmCandidates -or $vmCandidates.Count -eq 0) {
+            Write-Log -Message "[EVACUATION] No VM to evacuate on $($mmESX.Name)"
             continue
         }
 
-        Write-Log -Message "Number of VMs to evacuate: $($vmCandidates.Count)"
+        # Separate PoweredOn and PoweredOff VMs for priority handling
+        $vmsPoweredOn = $vmCandidates | Where-Object { $_.PowerState -eq 'PoweredOn' }
+        $vmsPoweredOff = $vmCandidates | Where-Object { $_.PowerState -eq 'PoweredOff' }
 
-        $sizes = $vmCandidates | Select-Object -ExpandProperty MemoryGB | Sort-Object
-        $count = $sizes.Count
-        if ($count -eq 0) { continue }
+        Write-Log -Message "[EVACUATION] VMs to evacuate: $($vmsPoweredOn.Count) powered ON + $($vmsPoweredOff.Count) powered OFF = $($vmCandidates.Count) total"
 
-        if ($count % 2 -eq 1) {
-            $medianSize = $sizes[([int]($count/2))]
-        }
-        else {
-            $medianSize = ($sizes[($count/2)-1] + $sizes[($count/2)]) / 2
-        }
-
-        Write-Log -Message "Median VM size: $medianSize GB"
-
-        $vmsToMove = $vmCandidates |
-            Sort-Object @{Expression = { [math]::Abs($_.MemoryGB - $medianSize) }; Ascending = $true} |
-            Select-Object -First $slotsDispoInitial
-
-        Write-Log -Message "VMs selected for migration: $($vmsToMove.Count)"
-        Write-Log -Message "-----------------------------------------"
-
-        foreach ($vm in $vmsToMove) {
-            if (Test-VmMigrating -VM $vm) {
-                Write-Log -Message "VM '$($vm.Name)' already migrating, skipped."
-                continue
-            }
-
+        # ============================================================
+        # PART 1: PoweredOn VMs - Apply full rule logic
+        # ============================================================
+        foreach ($vm in $vmsPoweredOn) {
+            # Dynamic recalculation of available slots
             $nbEnCours = Get-CurrentVmotionCount -ClusterName $ClusterName
             $slotsDispo = $MaxMigrationsEvacTotal - ($nbEnCours + $movesThisLoop)
+
             if ($slotsDispo -le 0) {
-                Write-Log -Message "vMotion slots consumed for this loop."
+                Write-Log -Message "[EVACUATION] vMotion slots consumed for this loop ($nbEnCours in progress + $movesThisLoop launched), waiting for next iteration."
                 return
             }
 
+            # Skip VMs already migrating
+            if (Test-VmMigrating -VM $vm) {
+                Write-Log -Message "[EVACUATION] VM '$($vm.Name)' already migrating, skipped."
+                continue
+            }
+
+            # Filter storage-compatible target hosts
             $compatibleTargets = $targetHosts | Where-Object {
                 Test-StorageCompatible -VM $vm -TargetHost $_
             }
 
             if (-not $compatibleTargets) {
-                Write-Log -Message "No target host with compatible storage for VM '$($vm.Name)'" -Level Warning
+                Write-Log -Message "[EVACUATION] No target host with compatible storage for VM '$($vm.Name)' (Memory: $($vm.MemoryGB)GB, State: PoweredOn). vMotion skipped (slot NOT consumed)." -Level Warning
                 continue
             }
 
+            # Variable to hold the selected target and migration reason
             $bestTarget = $null
             $migrationReason = "balancing"
 
-            $vmToHostTarget = Get-VmToHostTargetHost -VMName $vm.Name -VmToHostRules $VmToHostRules -ClusterName $ClusterName -VM $vm
+            # ============================================================
+            # PRIORITY 1: VM-to-Host (only if target host valid and available)
+            # ============================================================
+            $vmToHostTarget = Get-VmToHostTargetHost -VMName $vm.Name `
+                -VmToHostRules $VmToHostRules `
+                -ClusterName $ClusterName `
+                -VM $vm
+
             if ($vmToHostTarget -and ($compatibleTargets.Name -contains $vmToHostTarget.Name)) {
+                # VM-to-Host rule can be applied
                 $bestTarget = Get-HostLoad -ESXHost $vmToHostTarget -IncludeNetwork:$IncludeNetwork
                 $migrationReason = "VM-TO-HOST"
-                Write-Log -Message "[EVACUATION][VM-TO-HOST] VM '$($vm.Name)' directed to '$($vmToHostTarget.Name)'"
-            } elseif ($vmToHostTarget) {
-                Write-Log -Message "[EVACUATION][VM-TO-HOST] VM '$($vm.Name)' target host in maintenance. Rule suspended." -Level Warning
+                Write-Log -Message "[EVACUATION][VM-TO-HOST] VM '$($vm.Name)' directed to $($vmToHostTarget.Name) (rule respected)"
+            }
+            elseif ($vmToHostTarget) {
+                # VM-to-Host rule exists BUT target host is unavailable
+                Write-Log -Message "[EVACUATION][VM-TO-HOST] VM '$($vm.Name)' should go to $($vmToHostTarget.Name) but this host is in maintenance or incompatible. VM-to-Host rule SUSPENDED for evacuation (will use fallback)." -Level Warning
             }
 
+            # ============================================================
+            # PRIORITY 2: Affinity (only if no VM-to-Host was applied)
+            # ============================================================
             if (-not $bestTarget) {
-                $affinityHost = Get-AffinityTargetHost -VMName $vm.Name -AffinityGroups $AffinityGroups -ClusterName $ClusterName -VM $vm
+                $affinityHost = Get-AffinityTargetHost -VMName $vm.Name `
+                    -AffinityGroups $AffinityGroups `
+                    -ClusterName $ClusterName `
+                    -VM $vm
+
                 if ($affinityHost -and ($compatibleTargets.Name -contains $affinityHost.Name)) {
+                    # Affinity rule can be applied
                     $bestTarget = Get-HostLoad -ESXHost $affinityHost -IncludeNetwork:$IncludeNetwork
                     $migrationReason = "AFFINITY"
-                    Write-Log -Message "[EVACUATION][AFFINITY] VM '$($vm.Name)' directed to '$($affinityHost.Name)'"
-                } elseif ($affinityHost) {
-                    Write-Log -Message "[EVACUATION][AFFINITY] VM '$($vm.Name)' target host in maintenance. Rule suspended." -Level Warning
+                    Write-Log -Message "[EVACUATION][AFFINITY] VM '$($vm.Name)' directed to $($affinityHost.Name) (group respected)"
+                }
+                elseif ($affinityHost) {
+                    # Affinity rule exists BUT target host is unavailable
+                    Write-Log -Message "[EVACUATION][AFFINITY] VM '$($vm.Name)' should go to $($affinityHost.Name) but this host is in maintenance or incompatible. Affinity rule SUSPENDED for evacuation (will use fallback)." -Level Warning
                 }
             }
 
+            # ============================================================
+            # PRIORITY 3: Anti-affinity (filtering only, best effort)
+            # ============================================================
             if (-not $bestTarget) {
-                $antiAffinityTargets = Get-AntiAffinityCompatibleHosts -VM $vm -TargetHosts $compatibleTargets -AntiAffinityGroups $AntiAffinityGroups -ClusterName $ClusterName
-                
+                # Apply anti-affinity filtering to compatible targets
+                $antiAffinityTargets = Get-AntiAffinityCompatibleHosts -VM $vm `
+                    -TargetHosts $compatibleTargets `
+                    -AntiAffinityGroups $AntiAffinityGroups `
+                    -ClusterName $ClusterName
+
                 if ($antiAffinityTargets -and $antiAffinityTargets.Count -gt 0) {
+                    # Select best host among anti-affinity compatible hosts
                     $bestTarget = Get-BestTargetHost -ESXHosts $antiAffinityTargets -IncludeNetwork:$IncludeNetwork
                     $migrationReason = "ANTI-AFFINITY"
-                    Write-Log -Message "[EVACUATION][ANTI-AFFINITY] VM '$($vm.Name)' placed respecting anti-affinity"
+                    Write-Log -Message "[EVACUATION][ANTI-AFFINITY] VM '$($vm.Name)' to host respecting anti-affinity"
+                }
+                else {
+                    Write-Log -Message "[EVACUATION][ANTI-AFFINITY] No host available respecting anti-affinity constraints for '$($vm.Name)'. Rule SUSPENDED for evacuation (will use forced fallback)." -Level Warning
                 }
             }
 
+            # ============================================================
+            # MANDATORY FALLBACK: If no rule has given a valid target
+            # ============================================================
             if (-not $bestTarget) {
+                # FORCED evacuation: select best available host regardless of rules
                 $bestTarget = Get-BestTargetHost -ESXHosts $compatibleTargets -IncludeNetwork:$IncludeNetwork
                 $migrationReason = "FORCED-EVACUATION"
-                Write-Log -Message "[EVACUATION][FORCE] VM '$($vm.Name)' to best available host"
+                Write-Log -Message "[EVACUATION][FORCE] VM '$($vm.Name)' (State: PoweredOn) to best available host (affinity/VM-to-Host rules suspended due to maintenance)"
             }
 
+            # ============================================================
+            # Final check: If still no target (should never happen)
+            # ============================================================
             if (-not $bestTarget -or -not $bestTarget.ESXHost) {
-                Write-Log -Message "[EVACUATION] Cannot find target host for '$($vm.Name)'" -Level Warning
+                Write-Log -Message "[EVACUATION][CRITICAL ERROR] Impossible to find a target host for '$($vm.Name)'. Migration canceled." -Level Warning
+                Write-Log -Message "[EVACUATION][DEBUG] compatibleTargets Count: $($compatibleTargets.Count)" -Level Warning
                 continue
             }
 
-            $msg = "[EVACUATION][$migrationReason] VM '$($vm.Name)' (Mem: $($vm.MemoryGB)GB) : $($vm.VMHost.Name) → $($bestTarget.ESXHost.Name)"
+            # ============================================================
+            # Execute the migration for PoweredOn VM
+            # ============================================================
+            $msg = "[EVACUATION][$migrationReason] VM '$($vm.Name)' [PoweredOn] (Mem: $($vm.MemoryGB)GB) : $($vm.VMHost.Name) → $($bestTarget.ESXHost.Name) (load: $($bestTarget.LoadScore))"
 
             if ($DryRun) {
                 Write-Log -Message "[DRYRUN] $msg"
-            } else {
+            }
+            else {
                 Write-Host $msg
                 try {
                     Move-VM -VM $vm -Destination $bestTarget.ESXHost -RunAsync -ErrorAction Stop | Out-Null
-                    Write-Log -Message "[EVACUATION] ✓ Migration launched successfully"
-                } catch {
-                    Write-Log -Message "[EVACUATION] ✗ Migration error: $_" -Level Warning
+                    Write-Log -Message "[EVACUATION] Migration launched successfully"
+                    $movesThisLoop++
+                }
+                catch {
+                    Write-Log -Message "[EVACUATION] Error during migration of '$($vm.Name)': $_" -Level Warning
                     continue
                 }
             }
-
-            $movesThisLoop++
-            Write-Log -Message "-----------------------------------------"
         }
+
+        # ============================================================
+        # PART 2: PoweredOff VMs - SIMPLIFIED LOGIC
+        # Just find ANY host with compatible storage, no rules applied
+        # ============================================================
+
+        foreach ($vm in $vmsPoweredOff) {
+            # Dynamic recalculation of available slots
+            $nbEnCours = Get-CurrentVmotionCount -ClusterName $ClusterName
+            $slotsDispo = $MaxMigrationsEvacTotal - ($nbEnCours + $movesThisLoop)
+
+            if ($slotsDispo -le 0) {
+                Write-Log -Message "[EVACUATION] vMotion slots consumed for this loop ($nbEnCours in progress + $movesThisLoop launched), waiting for next iteration."
+                return
+            }
+
+            # Skip VMs already migrating (even PoweredOff can be migrating)
+            if (Test-VmMigrating -VM $vm) {
+                Write-Log -Message "[EVACUATION] VM '$($vm.Name)' [PoweredOff] already migrating, skipped."
+                continue
+            }
+
+            # ============================================================
+            # SIMPLIFIED: Just find first host with compatible storage
+            # No affinity, no anti-affinity, no load balancing
+            # ============================================================
+            $compatibleTarget = $null
+            foreach ($targetHost in $targetHosts) {
+                if (Test-StorageCompatible -VM $vm -TargetHost $targetHost) {
+                    $compatibleTarget = $targetHost
+                    break  # Take the first compatible host and go!
+                }
+            }
+
+            if (-not $compatibleTarget) {
+                Write-Log -Message "[EVACUATION] No target host with compatible storage for VM '$($vm.Name)' [PoweredOff]. vMotion skipped." -Level Warning
+                continue
+            }
+
+            # ============================================================
+            # Execute the migration for PoweredOff VM (no rule checking)
+            # ============================================================
+            $msg = "[EVACUATION][SIMPLE] VM '$($vm.Name)' [PoweredOff] : $($vm.VMHost.Name) → $($compatibleTarget.Name)"
+
+            if ($DryRun) {
+                Write-Log -Message "[DRYRUN] $msg"
+            }
+            else {
+                Write-Host $msg
+                try {
+                    Move-VM -VM $vm -Destination $compatibleTarget -RunAsync -ErrorAction Stop | Out-Null
+                    Write-Log -Message "[EVACUATION] Migration launched successfully"
+                    $movesThisLoop++
+                }
+                catch {
+                    Write-Log -Message "[EVACUATION] Error during migration of PoweredOff VM '$($vm.Name)': $_" -Level Warning
+                    continue
+                }
+            }
+        }
+
+        Write-Log -Message "-----------------------------------------"
     }
 
     if ($movesThisLoop -gt 0) {
         Write-Log -Message "========================================="
-        Write-Log -Message "EVACUATION: $movesThisLoop migration(s) launched"
+        Write-Log -Message "[EVACUATION] $movesThisLoop migration(s) launched for evacuation"
         Write-Log -Message "========================================="
     }
 }
 
-#endregion
 
 
 #region Balancing
