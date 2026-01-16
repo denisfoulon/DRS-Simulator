@@ -17,7 +17,14 @@ It provides advanced VM placement and load-balancing capabilities with support f
 - **Dry-Run Mode**: Test changes without performing actual VM migrations
 
 ## Version History
-
+### v1.34 (2026-01-16)
+#### **Rules Check Throttling System** (`$RulesCheckEveryXLoops`)
+- **Problem solved**: Continuous file reading and rule parsing every 60 seconds created unnecessary CPU/IO overhead
+- **New behavior**: Rules are now checked every **X loops** instead of every loop (default: 15 loops = 15 minutes)
+- **Smart file monitoring**: Rules are only reloaded if file `LastWriteTime` changed since last check
+- **Memory optimization**: Rules cached in `$script:affinityGroups`, `$script:antiAffinityGroups`, `$script:vmToHostRules` between checks
+- **Performance gain**: ~93% reduction in file I/O operations (1 check per 15 minutes vs 1 per minute)
+- **Configuration**: Set `$RulesCheckEveryXLoops = 1` to restore original behavior (check every loop)
 
 ### v1.33 (2026-01-16)
 - Migrations enhanced for evacuation
