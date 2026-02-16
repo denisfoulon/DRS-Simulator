@@ -17,6 +17,35 @@ It provides advanced VM placement and load-balancing capabilities with support f
 - **Dry-Run Mode**: Test changes without performing actual VM migrations
 
 ## Version History
+### v1.35 (2026-02-16)
+
+#### Cluster Data Caching
+- Cached cluster VMs and hosts (refresh every 30s)
+- Eliminates repeated `Get-VM` / `Get-VMHost` calls
+- ~50–60% reduction in vCenter API usage
+
+#### Host Load Cache (TTL)
+- Host CPU, memory and network load cached for 30s
+- Avoids redundant `Get-Stat` calls
+- `-BypassCache` option for real-time data
+
+#### Evacuation Queue System
+- Persistent evacuation queue across loops
+- Real-time progress tracking (evacuated vs remaining VMs)
+- Dedicated handling for powered-off VMs
+- vMotion slot protection via live vMotion count checks
+
+#### Intelligent Evacuation Targeting
+- Priority-based host selection (rules → affinity → anti-affinity → best host)
+- Migration reason logged for full transparency
+- Storage compatibility validated before migration
+
+#### Stability & Memory Optimizations
+- GC interval reduced (12h → 1h)
+- vCenter recycle interval reduced (24h → 2h)
+- Improved reconnect and error handling
+
+
 ### v1.34 (2026-01-16)
 #### **Rules Check Throttling System** (`$RulesCheckEveryXLoops`)
 - **Problem solved**: Continuous file reading and rule parsing every 60 seconds created unnecessary CPU/IO overhead
