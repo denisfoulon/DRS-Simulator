@@ -1789,7 +1789,148 @@ foreach ($dst in $underloaded) {
 }
 
     }
+
+    # =========================================================================
+    # VM COUNT REBALANCING
+    # Proactively redistribute VMs toward sparse/empty hosts even when no host
+    # is overloaded. This handles the case where a host exits maintenance with
+    # 0 VMs and the rest of the cluster is comfortably within thresholds.
+    #
+    # Trigger condition: at least one host has significantly fewer VMs than
+    # the cluster average (threshold: $VmCountImbalanceThreshold, default 2).
+    # Source hosts must be above the low-load mark on CPU or memory to avoid
+    # pointless migrations from already-idle hosts.
+    # =========================================================================
+
+    $vmCountImbalanceThreshold = 2   # Min delta vs average to consider a host sparse
+
+    # Refresh host loads (may already be cached, cost is minimal)
+    $hostLoadsForCount = $esxHosts | ForEach-Object {
+        Get-HostLoad -ESXHost $_ -IncludeNetwork:$IncludeNetwork
+    }
+
+    # Compute VM count per host
+    $vmCountPerHost = $hostLoadsForCount | ForEach-Object {
+        [PSCustomObject]@{
+            HostLoad   = $_
+            VMCount    = $_.PoweredOnVMs
+        }
+    }
+
+    $totalVMs   = ($vmCountPerHost | Measure-Object -Property VMCount -Sum).Sum
+    $hostCount  = $vmCountPerHost.Count
+
+    if ($hostCount -gt 1 -and $totalVMs -gt 0) {
+
+        $avgVMCount = $totalVMs / $hostCount
+
+        # Sparse hosts: significantly below average
+        $sparseHosts = $vmCountPerHost | Where-Object {
+            ($avgVMCount - $_.VMCount) -ge $vmCountImbalanceThreshold
+        } | Sort-Object VMCount   # emptiest first
+
+        # Donor hosts: above average AND not already lightly loaded
+        # Using Low thresholds as the gate (much softer than High thresholds)
+        $donorHosts = $vmCountPerHost | Where-Object {
+            $_.VMCount -gt $avgVMCount
+        } | Sort-Object VMCount -Descending   # most VMs first
+
+        if ($sparseHosts -and $donorHosts) {
+
+            Write-Log -Message "[BALANCE|VMCOUNT] VM count imbalance detected. Average: $([math]::Round($avgVMCount,1)) VMs/host. Sparse host(s): $(($sparseHosts | ForEach-Object { "$($_.HostLoad.ESXHost.Name)=$($_.VMCount)" }) -join ', ')"
+
+            $countMovesDone = 0
+
+            foreach ($sparse in $sparseHosts) {
+
+                if ($countMovesDone -ge $MaxMigrations) { break }
+
+                $sparseHost = $sparse.HostLoad.ESXHost
+
+                foreach ($donor in $donorHosts) {
+
+                    if ($countMovesDone -ge $MaxMigrations) { break }
+
+                    $donorHost = $donor.HostLoad.ESXHost
+
+                    if ($donorHost.Name -eq $sparseHost.Name) { continue }
+
+                    # Pick a candidate VM on the donor: prefer median-sized VMs
+                    # to avoid moving the largest or smallest (less disruptive)
+                    $donorVMs = $donorHost | Get-VM | Where-Object {
+                        $_.PowerState -eq 'PoweredOn' -and
+                        -not (Test-VmBlacklisted -VM $_ `
+                            -NameBlacklistPatterns $NameBlacklistPatterns `
+                            -TagBlacklistNames $TagBlacklistNames)
+                    }
+
+                    if (-not $donorVMs -or $donorVMs.Count -eq 0) { continue }
+
+                    $donorSizes = $donorVMs | Select-Object -ExpandProperty MemoryGB | Sort-Object
+                    $donorCount = $donorSizes.Count
+                    $medianMem  = if ($donorCount % 2 -eq 1) {
+                        $donorSizes[[int]($donorCount / 2)]
+                    } else {
+                        ($donorSizes[($donorCount / 2) - 1] + $donorSizes[$donorCount / 2]) / 2
+                    }
+
+                    $candidate = $donorVMs | Sort-Object {
+                        [Math]::Abs($_.MemoryGB - $medianMem)
+                    } | Select-Object -First 1
+
+                    if (-not $candidate)                                               { continue }
+                    if (Test-VmMigrating -VM $candidate)                               { continue }
+                    if (-not (Test-StorageCompatible -VM $candidate -TargetHost $sparseHost)) { continue }
+
+                    # Respect anti-affinity: make sure moving this VM to sparseHost
+                    # does not create a violation
+                    $antiAffinityOK = $true
+                    if ($AntiAffinityGroups -and $AntiAffinityGroups.Count -gt 0) {
+                        $allowedByAntiAffinity = Get-AntiAffinityCompatibleHosts `
+                            -VM $candidate `
+                            -TargetHosts @($sparseHost) `
+                            -AntiAffinityGroups $AntiAffinityGroups `
+                            -ClusterName $ClusterName
+                        if (-not $allowedByAntiAffinity -or $allowedByAntiAffinity.Count -eq 0) {
+                            Write-Log -Message "[BALANCE|VMCOUNT] VM '$($candidate.Name)' skipped: anti-affinity rule blocks move to $($sparseHost.Name)" -Level Debug
+                            $antiAffinityOK = $false
+                        }
+                    }
+                    if (-not $antiAffinityOK) { continue }
+
+                    $msg = "[BALANCE|VMCOUNT] Rebalancing VM count: '$($candidate.Name)' $($donorHost.Name) ($($donor.VMCount) VMs) → $($sparseHost.Name) ($($sparse.VMCount) VMs) [avg: $([math]::Round($avgVMCount,1))]"
+
+                    if ($DryRun) {
+                        Write-Log -Message "[DRYRUN] $msg"
+                    } else {
+                        Write-Host $msg
+                        Move-VM -VM $candidate -Destination $sparseHost -RunAsync -ErrorAction SilentlyContinue | Out-Null
+                    }
+
+                    $countMovesDone++
+
+                    # Update local counters so the next iteration of the loop
+                    # uses refreshed estimates without an extra API call
+                    $sparse.VMCount++
+                    $donor.VMCount--
+
+                    break  # One VM per sparse host per cycle — gentle rebalancing
+                }
+            }
+
+            if ($countMovesDone -gt 0) {
+                Write-Log -Message "[BALANCE|VMCOUNT] $countMovesDone VM(s) scheduled for VM-count rebalancing."
+            } else {
+                Write-Log -Message "[BALANCE|VMCOUNT] VM count imbalance detected but no eligible migration found (storage/anti-affinity/blacklist constraints)."
+            }
+
+        } else {
+            Write-Log -Message "[BALANCE|VMCOUNT] VM count distribution is balanced (avg: $([math]::Round($avgVMCount,1)) VMs/host)." -Level Debug
+        }
+    }
+
 }
+
 
 # ---------- Main loop ----------
 while ($true) {
