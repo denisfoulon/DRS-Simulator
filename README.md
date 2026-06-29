@@ -11,68 +11,42 @@ It provides advanced VM placement and load-balancing capabilities with support f
 - **Anti-Affinity Rules**: Ensure VMs run on separate hosts for improved availability
 - **VM-to-Host Rules**: Pin specific VMs to designated hosts
 - **Host Evacuation**: Automatic VM migration when a host enters maintenance mode
-- **Load Balancing**: Distribute VMs across hosts based on CPU, memory, and network usage
-- **Centralized Logging**: Syslog integration for monitoring and auditing
-- **Blacklist Support**: Exclude VMs from automated migration logic
+- **Load Balancing**: Distribute VMs across hosts based on dynamic CPU, memory, and network metrics (weighted towards memory)
+- **Centralized Logging**: Syslog integration (RFC 3164) for monitoring and auditing
+- **Blacklist Support**: Exclude VMs from automated migration logic by name pattern or vCenter tags
 - **Dry-Run Mode**: Test changes without performing actual VM migrations
 
 ## Version History
+
+### v1.39 (2026-06-29)
+- **Rules Check Throttling Adjustment**: Increased the rules check throttling interval (`$RulesCheckEveryXLoops`) to 23 loops by default to further minimize file I/O and CPU overhead in stable environments.
+- **Project Baseline**: Main loop optimization and script header alignment for the 2026 release.
+
+### v1.38
+- **Multi-Core CPU Calculation Bug Fix**: Resolved a critical calculation bug in `Get-HostLoad` where `OverallCpuUsage` (total MHz across all cores) was divided only by `CpuMhz`, leading to incorrect percentages of 300%–700% on multi-core hosts. The formula now correctly divides by `(CpuMhz * NumCpuCores)`, fixing silent failures in threshold comparisons and delta balancing.
+
+### v1.37
+- **Delta-Based Balancing Triggers**: Shifted cluster balancing logic from hard thresholds to a dynamic delta-based mechanism (`$DeltaTriggerCpu` and `$DeltaTriggerMem` set to 15). A host is now flagged as a migration source or target if it deviates from the cluster average by more than this value, preventing aggressive or unnecessary vMotions.
+- **Memory-Weighted Load Score**: Updated the load score formula to address memory as the primary bottleneck in the cluster. The calculation now heavily weights memory available on targets.
+
 ### v1.35 (2026-02-16)
-
-#### Cluster Data Caching
-- Cached cluster VMs and hosts (refresh every 30s)
-- Eliminates repeated `Get-VM` / `Get-VMHost` calls
-- ~50–60% reduction in vCenter API usage
-
-#### Host Load Cache (TTL)
-- Host CPU, memory and network load cached for 30s
-- Avoids redundant `Get-Stat` calls
-- `-BypassCache` option for real-time data
-
-#### Evacuation Queue System
-- Persistent evacuation queue across loops
-- Real-time progress tracking (evacuated vs remaining VMs)
-- Dedicated handling for powered-off VMs
-- vMotion slot protection via live vMotion count checks
-
-#### Intelligent Evacuation Targeting
-- Priority-based host selection (rules → affinity → anti-affinity → best host)
-- Migration reason logged for full transparency
-- Storage compatibility validated before migration
-
-#### Stability & Memory Optimizations
-- GC interval reduced (12h → 1h)
-- vCenter recycle interval reduced (24h → 2h)
-- Improved reconnect and error handling
-
+- **Cluster Data Caching**: Cached cluster VMs and hosts (refresh every 30s) to reduce vCenter API usage by ~50–60%.
+- **Host Load Cache (TTL)**: Cached CPU, memory, and network load for 30s with a `-BypassCache` option for real-time data.
+- **Evacuation Queue System**: Persistent evacuation queue across loops with tracking of remaining VMs, dedicated handling for powered-off VMs, and live vMotion count safety checks.
+- **Intelligent Evacuation Targeting**: Priority-based host selection (rules → affinity → anti-affinity → best host) with mandatory storage compatibility validation.
+- **Stability & Memory Optimizations**: Reduced GC interval (1h) and vCenter recycle interval (2h) with automated memory usage monitoring and alerts if exceeding 2 GB.
 
 ### v1.34 (2026-01-16)
-#### **Rules Check Throttling System** (`$RulesCheckEveryXLoops`)
-- **Problem solved**: Continuous file reading and rule parsing every 60 seconds created unnecessary CPU/IO overhead
-- **New behavior**: Rules are now checked every **X loops** instead of every loop (default: 15 loops = 15 minutes)
-- **Smart file monitoring**: Rules are only reloaded if file `LastWriteTime` changed since last check
-- **Memory optimization**: Rules cached in `$script:affinityGroups`, `$script:antiAffinityGroups`, `$script:vmToHostRules` between checks
-- **Performance gain**: ~93% reduction in file I/O operations (1 check per 15 minutes vs 1 per minute)
-- **Configuration**: Set `$RulesCheckEveryXLoops = 1` to restore original behavior (check every loop)
+- **Rules Check Throttling System** (`$RulesCheckEveryXLoops`): Cached parsed rules in memory and implemented smart file monitoring via `LastWriteTime` to reduce file I/O operations by ~93%.
 
 ### v1.33 (2026-01-16)
-- Migrations enhanced for evacuation
+- Migrations enhanced for host evacuation.
 
 ### v1.32 (2025-12-16)
-- Automatic garbage collection every 12h
-- vCenter recycling every 24h with automatic reconnection
-- Proper UDP disposal (Close + Dispose) in Send-SyslogMessage
-- Automatic Get-Stat cleanup after each use
-- Memory monitoring every hour with alerts
-- Automatic statistics cache cleanup
-- Automatic alerts if memory exceeds 2 GB
+- Automated garbage collection, vCenter session recycling with auto-reconnection, proper UDP socket disposal in Syslog functions, and statistics cache cleanup.
 
 ### v1.31 (2025-12-02)
-
-- Added Syslog support for centralized logging
-- All logs now sent via UDP to the remote Syslog server
-- Console output preserved in parallel
-- Syslog parameters (server, port, facility) are now fully configurable
+- Added RFC 3164 Syslog support via UDP for centralized logging while preserving console output in parallel.
 
 ## Requirements
 
@@ -81,156 +55,30 @@ It provides advanced VM placement and load-balancing capabilities with support f
 - vCenter Server 6.5 or later
 - Appropriate vCenter permissions (VM migration, host management)
 
-
 ## How It Works
 
-1. **Initialization**: Connects to vCenter and loads rule files
+1. **Initialization**: Connects to vCenter using secured credentials and loads initial placement rules.
 2. **Continuous Loop**:
-   - Detects hosts entering maintenance mode
-   - Applies affinity rules
-   - Enforces anti-affinity rules
-   - Applies VM-to-host pinning
-   - Runs load balancing if no evacuation is in progress
-3. **Logging**: All actions are logged to the console and optionally to a Syslog server
+   - Monitors and tracks hosts entering maintenance mode.
+   - Enforces VM-to-Host pinning rules.
+   - Enforces Affinity groups.
+   - Resolves Anti-Affinity rule violations.
+   - Runs delta-based cluster load balancing if no evacuation tasks are active.
+3. **Logging**: Dispatches structured logs to the local console and optionally to a centralized Syslog server.
 
 ### Load Calculation
 
-Load score = (0.4 × CPU%) + (0.4 × Memory%) + (0.2 × normalized Network%)
+To accurately balance the cluster, a **Load Score** is calculated for each host using a memory-centric distribution formula:
 
-The script migrates VMs from overloaded hosts to underloaded hosts while respecting all placement rules.
+$$\text{Load Score} = (0.25 \times \text{CPU}\%) + (0.65 \times \text{Memory}\%) + (0.10 \times \text{Normalized Network}\%)$$
+
+*Note: Since memory is the primary resource bottleneck in high-density virtualized environments, a heavier weight is assigned to it to guarantee optimal target selection.*
 
 ## Advanced Features
 
 ### Blacklisting
 
-Exclude VMs from automated management:
-
-**By name pattern:**
-<pre>-NameBlacklistPatterns @("vCLS", "NOMOVE")</pre>
-
-### Storage Compatibility
-
-Before migration, the script automatically checks datastore accessibility to avoid failed vMotions.
-
-### Priority System
-
-During host evacuation, rules are applied in this order:
-
-1. VM-to-Host rules (if possible)
-2. Affinity rules
-3. Anti-affinity rules (best effort)
-4. Best available host (mandatory fallback)
-
-## Monitoring
-
-### Syslog Integration
-
-Configure your Syslog server to receive UDP traffic on port 514 (or a custom port).
-
-Logged events include:
-
-- Migration operations
-- Detected rule violations
-- Host evacuation steps
-- Load balancing actions
-- Errors and warnings
-
-### Log Levels
-
-- **Info (6)**: Normal operational messages
-- **Warning (4)**: Potential issues, temporary rule suspensions
-- **Error (3)**: Failed operations
-- **Debug (7)**: Detailed troubleshooting data
-
-## Installation
-
-1. Clone this repository:
-<pre>git clone https://github.com/denisfoulon/DRS-Simulator.git</pre>
-
-2. Install VMware PowerCLI (if not already installed):
-<pre>Install-Module -Name VMware.PowerCLI -Scope CurrentUser</pre>
-
-3. Create a credential file:
-<pre>Get-Credential | Export-Clixml -Path "C:\MyawesomeProject\vcenter_credentials.xml"</pre>
-
-
-## Configuration
-
-### Basic Parameters
-<pre>$VCenter = "vcenter.example.com"
-$ClusterName = "production_cluster"</pre>
-
-### Timing
-<pre>$NormalLoopSleepSeconds = 60
-$EvacLoopSleepSeconds = 20</pre>
-
-### Migration limits
-<pre>$MaxMigrationsBalancePerLoop = 3
-$MaxMigrationsEvacTotal = 8</pre>
-
-### Syslog
-<pre>$SyslogServer = "syslog.example.com"
-$SyslogPort = 514
-$EnableSyslog = $true</pre>
-
-## Usage
-
-### Standard Mode
-<pre>.\DRS_simulator.ps1 -VCenter "vcenter.example.com" -ClusterName "production_cluster"</pre>
-
-
-### Dry-Run Mode (Test without migrations)
-<pre>.\DRS_simulator.ps1 -DryRun</pre>
-
-
-### With Network Metrics
-<pre>.\DRS_simulator.ps1 -IncludeNetwork</pre>
-
-
-### Disable Syslog
-<pre>.\DRS_simulator.ps1 -EnableSyslog:$false</pre>
-
-
-### Rule Files
-
-Create three text files for your placement rules:
-
-#### Affinity Rules (affinity_rules.txt)
-<pre>vm-web-01 vm-web-02 vm-web-03
-vm-db-01 vm-db-02</pre>
-
-#### Anti-Affinity Rules (`anti_affinity_rules.txt`)
-<pre>vm-license-server esxi-host-01.example.com
-vm-backup-proxy esxi-host-04.example.com</pre>
-
-#### VM-to-Host Rules (`vm_to_host_rules.txt`)
-<pre>vm-license-server esxi-host-01.example.com
-vm-backup-proxy esxi-host-04.example.com</pre>
-
-
-
-## How It Works
-
-1. **Initialization**: Connects to vCenter and loads rule files
-2. **Continuous Loop**:
-   - Detects hosts entering maintenance mode
-   - Applies affinity rules
-   - Enforces anti-affinity rules
-   - Applies VM-to-host pinning
-   - Runs load balancing if no evacuation is in progress
-3. **Logging**: All actions are logged to the console and optionally to a Syslog server
-
-### Load Calculation
-Load score = (0.4 × CPU%) + (0.4 × Memory%) + (0.2 × normalized Network%)
-
-
-The script migrates VMs from overloaded hosts to underloaded hosts while respecting all placement rules.
-
-## Advanced Features
-
-### Blacklisting
-
-Exclude VMs from automated management:
+Exclude specific virtual machines from being moved or managed by the script:
 
 **By name pattern:**
 <pre>-NameBlacklistPatterns @("vCLS", "NOMOVE")</pre>
@@ -240,65 +88,131 @@ Exclude VMs from automated management:
 
 ### Storage Compatibility
 
-Before migration, the script automatically checks datastore accessibility to avoid failed vMotions.
+Before executing any vMotion command, the script validates shared datastore accessibility on the destination host to proactively mitigate migration failures.
 
 ### Priority System
 
-During host evacuation, rules are applied in this order:
+During host evacuations, candidate target hosts are chosen strictly adhering to the following hierarchy:
 
-1. VM-to-Host rules (if possible)
-2. Affinity rules
-3. Anti-affinity rules (best effort)
-4. Best available host (mandatory fallback)
+1. **VM-to-Host rules** (Hard pinning constraint)
+2. **Affinity rules** (Grouping constraints)
+3. **Anti-Affinity rules** (Separation constraints on a best-effort basis)
+4. **Best available host** (Fallback based on the lowest Load Score)
+
+## Monitoring & Logging
+
+### Syslog Integration
+
+Configure your target logging system or SIEM to receive UDP traffic on port 514 (or your designated custom port). Logged structural data includes:
+- Triggered migration details (vMotions)
+- Active rule violations
+- Maintenance and host evacuation status steps
+- Resource rebalancing alerts and warnings
+
+### Log Levels
+
+- **Error (3)**: Critical script or migration failures.
+- **Warning (4)**: Potential resource issues or temporary rules suspensions.
+- **Info (6)**: Standard operational tracking loop logs.
+- **Debug (7)**: Granular troubleshooting performance metrics.
+
+## Installation
+
+1. Clone this repository:
+<pre>git clone https://github.com/denisfoulon/DRS-Simulator.git</pre>
+
+2. Install VMware PowerCLI (if missing):
+<pre>Install-Module -Name VMware.PowerCLI -Scope CurrentUser</pre>
+
+3. Create your secure credential XML file:
+<pre>Get-Credential | Export-Clixml -Path "C:\Scripts\DRS\vcenter_credentials.xml"</pre>
+
+## Configuration
+
+### Basic Parameters
+<pre>$VCenter = "vcenter.example.com"
+$ClusterName = "production_cluster"</pre>
+
+### Timing & Throttling
+<pre>$NormalLoopSleepSeconds = 60
+$EvacLoopSleepSeconds = 20
+$RulesCheckEveryXLoops = 23</pre>
+
+### Migration Limits
+<pre>$MaxMigrationsBalancePerLoop = 3
+$MaxMigrationsEvacTotal = 8</pre>
+
+### Balancing Triggers (Delta-based)
+<pre>$DeltaTriggerCpu = 15
+$DeltaTriggerMem = 15</pre>
+
+### Syslog Setup
+<pre>$SyslogServer = "syslog.example.com"
+$SyslogPort = 514
+$EnableSyslog = $true</pre>
+
+## Usage
+
+### Standard Production Mode
+<pre>.\DRS_simulator.ps1 -VCenter "vcenter.example.com" -ClusterName "production_cluster"</pre>
+
+### Dry-Run Mode (Simulation without movements)
+<pre>.\DRS_simulator.ps1 -DryRun</pre>
+
+### Include Network Metrics in Calculations
+<pre>.\DRS_simulator.ps1 -IncludeNetwork</pre>
+
+### Disable Syslog Output
+<pre>.\DRS_simulator.ps1 -EnableSyslog:$false</pre>
+
+### Rule Files Syntax
+
+The script expects three flat configuration text files:
+
+#### Affinity Rules (`liste_affinite.txt`)
+*VMs listed on the same line will be grouped onto the same host.*
+<pre>vm-web-01 vm-web-02 vm-web-03
+vm-db-01 vm-db-02</pre>
+
+#### Anti-Affinity Rules (`liste_antiaffinite.txt`)
+*VMs listed on the same line will be forced onto distinct hosts.*
+<pre>vm-dc-01 vm-dc-02
+vm-k8s-node01 vm-k8s-node02</pre>
+
+#### VM-to-Host Rules (`list_vm_to_host.txt`)
+*Format: `VM_Name Host_Name` to pin a VM to a given ESXi server.*
+<pre>vm-license-server esxi-host-01.example.com
+vm-backup-proxy esxi-host-04.example.com</pre>
 
 ## Troubleshooting
 
 ### Common Issues
 
 #### Cannot connect to vCenter
-
-- Verify the credential file
-- Check network connectivity
-- Ensure PowerCLI is installed
+- Verify the generated CLI-XML credential path and decryption permissions.
+- Validate port 443 connectivity to the vCenter FQDN.
 
 #### No migrations occurring
-
-- Check if VMs are blacklisted
-- Ensure enough hosts are available
-- Verify datastore compatibility
-- Check migration limits
+- Ensure target VMs are not matching `$NameBlacklistPatterns` or tagged with `$TagBlacklistNames`.
+- Confirm that target destination hosts have shared storage compatibility with the source datastores.
+- Verify that cluster hosts do not violate current delta trigger thresholds.
 
 #### Rules not being applied correctly
-
-- Check rule file syntax
-- Ensure relevant VMs exist and are powered on
-- Look for conflicting rules
-- Confirm datastore accessibility
+- Ensure rule file paths in the script parameters block match your local infrastructure layout.
+- Review text file syntax for hidden characters or incorrect spacing.
 
 ## Contributing
 
-Contributions are welcome!
-
-To contribute:
-
-1. Fork the repository
-2. Create a feature branch
-3. Implement your changes
-4. Test in a lab environment
-5. Submit a pull request
+Contributions are welcome! Please fork the repository, make your modifications in a separate feature branch, test your changes thoroughly within a non-production lab environment, and submit a detailed Pull Request.
 
 ## License
 
-This project is licensed under the MIT License see the LICENSE file for details.
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ## Disclaimer
 
-⚠️ **This script is provided AS-IS without warranty of any kind.**
-
-Always test in a non-production environment.
-
-The author assumes no liability for any damage resulting from its use.
+⚠️ **This script is provided AS-IS without warranty of any kind.** Always thoroughly test script execution in a staging or non-production environment first. The author assumes no liability for any automated operational damage resulting from its use.
 
 ## Support
 
-For issues, questions, or suggestions, please open an issue on GitHub.
+For issues, questions, or feature suggestions, please open a formal issue tracking ticket directly on the GitHub project repository.
