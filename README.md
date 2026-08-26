@@ -47,21 +47,30 @@ while avoiding unnecessary migration activity.
 
 ## Why DRS-Simulator?
 
-VMware vSphere already provides Distributed Resource Scheduler (DRS).
+VMware vSphere already provides a mature and deeply integrated Distributed
+Resource Scheduler (DRS).
 
-The goal of this project is **not to replace VMware DRS**, but to explore
-what a custom scheduling engine can provide when the decision process needs
-to be explicit, configurable, observable and operationally controlled.
+DRS-Simulator started with a simple question: **could I build my own DRS
+and have direct control over how placement, balancing and evacuation
+decisions are made?**
+
+What started as an attempt to build an alternative to VMware DRS evolved
+into a broader engineering project focused on **transparent, explicitly
+configurable and operationally controlled VM scheduling**.
+
+The project explores custom approaches to resource balancing, placement
+constraints, migration control, host evacuation and infrastructure
+observability.
 
 ---
 
 ## VMware DRS vs DRS-Simulator
 
-DRS-Simulator is **not intended to replace VMware DRS**.
+VMware DRS is a mature, deeply integrated VMware component.
 
-VMware DRS provides a mature and highly integrated scheduling solution.
-This project explores what can be achieved with a **transparent,
-explicitly configurable and independently controlled scheduling engine**.
+DRS-Simulator takes a different approach: the scheduling logic is explicit,
+transparent and independently configurable, allowing the behavior of the
+decision engine to be directly controlled and experimented with.
 
 The focus is on operational control: placement policies, migration
 throttling, evacuation behavior, resource weighting, observability and
