@@ -55,6 +55,34 @@ to be explicit, configurable, observable and operationally controlled.
 
 ---
 
+# VMware DRS vs DRS-Simulator
+
+DRS-Simulator is **not intended to replace VMware DRS**.
+
+The project explores a different design philosophy: a transparent and explicitly configurable scheduling engine where the decision process, migration limits and operational policies can be directly controlled.
+
+| Capability                    |     VMware DRS     |      DRS-Simulator     |
+| ----------------------------- | :----------------: | :--------------------: |
+| Resource balancing            |          ✅         |            ✅           |
+| VM-to-Host rules              |          ✅         |            ✅           |
+| Affinity rules                |          ✅         |            ✅           |
+| Anti-affinity rules           |          ✅         |            ✅           |
+| Custom resource weighting     |  VMware-controlled |    **Configurable**    |
+| Delta-based balancing         |  VMware-controlled |      **Explicit**      |
+| VM blacklist by name          |     Not native     |          **✅**         |
+| VM blacklist by tag           |     Not native     |          **✅**         |
+| Dry-run scheduling            | Different workflow |          **✅**         |
+| Explicit migration throttling |  VMware-controlled |    **Configurable**    |
+| Persistent evacuation queue   |   VMware-managed   |      **Explicit**      |
+| Storage pre-flight validation |   vSphere-managed  |      **Explicit**      |
+| Built-in RFC 3164 Syslog      |          ❌         |          **✅**         |
+| Custom evacuation fallback    |   VMware behavior  | **Best-effort policy** |
+
+The purpose is not to claim that a custom script is universally better than VMware DRS.
+
+The purpose is to provide a **controlled engineering platform for experimenting with scheduling policies and infrastructure automation**.
+---
+
 ## Key capabilities
 
 | Capability                      | Description                                                                                    |
@@ -859,35 +887,6 @@ It demonstrates practical experience with:
 * centralized logging;
 * operational observability;
 * fault-tolerant automation design.
-
----
-
-# VMware DRS vs DRS-Simulator
-
-DRS-Simulator is **not intended to replace VMware DRS**.
-
-The project explores a different design philosophy: a transparent and explicitly configurable scheduling engine where the decision process, migration limits and operational policies can be directly controlled.
-
-| Capability                    |     VMware DRS     |      DRS-Simulator     |
-| ----------------------------- | :----------------: | :--------------------: |
-| Resource balancing            |          ✅         |            ✅           |
-| VM-to-Host rules              |          ✅         |            ✅           |
-| Affinity rules                |          ✅         |            ✅           |
-| Anti-affinity rules           |          ✅         |            ✅           |
-| Custom resource weighting     |  VMware-controlled |    **Configurable**    |
-| Delta-based balancing         |  VMware-controlled |      **Explicit**      |
-| VM blacklist by name          |     Not native     |          **✅**         |
-| VM blacklist by tag           |     Not native     |          **✅**         |
-| Dry-run scheduling            | Different workflow |          **✅**         |
-| Explicit migration throttling |  VMware-controlled |    **Configurable**    |
-| Persistent evacuation queue   |   VMware-managed   |      **Explicit**      |
-| Storage pre-flight validation |   vSphere-managed  |      **Explicit**      |
-| Built-in RFC 3164 Syslog      |          ❌         |          **✅**         |
-| Custom evacuation fallback    |   VMware behavior  | **Best-effort policy** |
-
-The purpose is not to claim that a custom script is universally better than VMware DRS.
-
-The purpose is to provide a **controlled engineering platform for experimenting with scheduling policies and infrastructure automation**.
 
 ---
 
