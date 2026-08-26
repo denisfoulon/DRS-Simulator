@@ -12,6 +12,8 @@ vMotion decisions.
 > Keep the infrastructure balanced while preserving placement constraints —
 > and prioritize host evacuation when maintenance requires it.
 
+![DRS-Simulator architecture](docs/images/drs-simulator-overview.png)
+
 ---
 
 ## Running on real vSphere clusters
