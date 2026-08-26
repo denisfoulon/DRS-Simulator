@@ -16,8 +16,7 @@ vMotion decisions.
 
 ## Running on real vSphere clusters
 
-DRS-Simulator is currently running against **two production-like vSphere
-clusters**, continuously evaluating resource usage, placement constraints
+DRS-Simulator is currently running against **two production vSphere clusters**, continuously evaluating resource usage, placement constraints
 and host availability.
 
 The scheduler has been operating continuously through host reboots and
