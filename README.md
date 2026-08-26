@@ -2,15 +2,44 @@
 
 ## Constraint-aware VM placement & evacuation engine for VMware vSphere
 
-**DRS-Simulator** is a PowerShell-based custom scheduling and orchestration engine for VMware vSphere.
+DRS-Simulator is a PowerShell-based custom scheduling and orchestration
+engine for VMware vSphere.
 
-The project continuously evaluates **cluster resource usage, VM placement constraints, host availability and migration safety** to make controlled vMotion decisions.
+The project continuously evaluates cluster resource usage, VM placement
+constraints, host availability and migration safety to make controlled
+vMotion decisions.
 
-It was designed around a simple operational principle:
+> Keep the infrastructure balanced while preserving placement constraints —
+> and prioritize host evacuation when maintenance requires it.
 
-> **Keep the infrastructure balanced while preserving placement constraints — and prioritize host evacuation when maintenance requires it.**
+---
 
-Rather than attempting to reproduce every internal behavior of VMware DRS, DRS-Simulator provides a **transparent, configurable and operationally controlled scheduling model**.
+## Real-world lab validation
+
+DRS-Simulator has been tested continuously against a **9-host vSphere cluster**.
+
+During extended testing, hosts were repeatedly rebooted and workloads were
+progressively redistributed by the scheduler.
+
+### Overnight cluster state
+
+After more than 20 hours of continuous operation:
+
+![DRS-Simulator - 9-host cluster after overnight balancing](docs/images/cluster-balanced-overnight.png)
+
+**Observed cluster state:**
+
+| Metric | Observed |
+|---|---:|
+| Hosts | 9 |
+| CPU utilization | 4–37% |
+| Typical CPU range | 4–13% |
+| Memory utilization | 33–62% |
+| Automated balancing | Active |
+| Manual rebalancing | None |
+
+The scheduler progressively converges toward a stable resource distribution
+while avoiding unnecessary migration activity.
 
 ---
 
@@ -18,16 +47,9 @@ Rather than attempting to reproduce every internal behavior of VMware DRS, DRS-S
 
 VMware vSphere already provides Distributed Resource Scheduler (DRS).
 
-The goal of this project is therefore **not to replace VMware DRS**, but to explore what a custom scheduling engine can provide when the decision process needs to be:
-
-* explicit and understandable;
-* configurable;
-* observable;
-* constrained by custom operational policies;
-* predictable during maintenance operations;
-* independently tunable according to the infrastructure's resource profile.
-
-The project has been tested against a real multi-host vSphere environment and is designed to operate continuously as a long-running infrastructure automation process.
+The goal of this project is **not to replace VMware DRS**, but to explore
+what a custom scheduling engine can provide when the decision process needs
+to be explicit, configurable, observable and operationally controlled.
 
 ---
 
