@@ -14,18 +14,21 @@ vMotion decisions.
 
 ---
 
-## Real-world lab validation
+## Running on real vSphere clusters
 
-DRS-Simulator has been tested continuously against a **9-host vSphere cluster**.
+DRS-Simulator is currently running against **two production-like vSphere
+clusters**, continuously evaluating resource usage, placement constraints
+and host availability.
 
-During extended testing, hosts were repeatedly rebooted and workloads were
-progressively redistributed by the scheduler.
+The scheduler has been operating continuously through host reboots and
+maintenance operations, progressively redistributing workloads without
+requiring manual rebalancing.
 
-### Overnight cluster state
+### Overnight result
 
 After more than 20 hours of continuous operation:
 
-![DRS-Simulator - 9-host cluster after overnight balancing](docs/images/cluster-balanced-overnight.png)
+![DRS-Simulator - 9-host vSphere cluster after overnight balancing](docs/images/cluster-balanced-overnight.png)
 
 **Observed cluster state:**
 
