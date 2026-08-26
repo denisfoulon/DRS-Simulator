@@ -27,6 +27,10 @@ requiring manual rebalancing.
 
 ### Overnight result
 
+Immediately after a host reboot:
+
+![DRS-Simulator - 9-host vSphere cluster before overnight balancing](docs/images/cluster_unbalanced.png)
+
 After more than 20 hours of continuous operation:
 
 ![DRS-Simulator - 9-host vSphere cluster after overnight balancing](docs/images/cluster-balanced-overnight.png)
